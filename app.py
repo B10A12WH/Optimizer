@@ -5,7 +5,7 @@ import pulp
 import io
 import time
 
-st.set_page_config(page_title="V11.8 DETAIL VIEW", layout="wide", page_icon="🏎️")
+st.set_page_config(page_title="V11.9 FINAL LOCKDOWN", layout="wide", page_icon="🏎️")
 
 class VantageProV11:
     def __init__(self, df):
@@ -90,29 +90,40 @@ class VantageProV11:
                 l_list = [sim_df.loc[i] for s in slots for i in sim_df.index if choices[i][s].varValue == 1]
                 win_pct, avg_score, ms = self.simulate_win_pct_institutional(l_list, sim_strength)
                 total_crunch_time += ms
-                # TWEAK: Ensuring Salary and Individual Player details are captured
-                final_pool.append({
-                    'players': {slots[k]: l_list[k] for k in range(8)}, 
-                    'metrics': {'Win': round(win_pct, 2), 'Own': round(sum([p['Own'] for p in l_list]), 1), 'Sal': sum([p['Sal'] for p in l_list])}
-                })
+                final_pool.append({'players': {slots[k]: l_list[k] for k in range(8)}, 'metrics': {'Win': round(win_pct, 2), 'Own': round(sum([p['Own'] for p in l_list]), 1), 'Sal': sum([p['Sal'] for p in l_list])}})
                 indices_store.append([i for i in sim_df.index if any(choices[i][s].varValue == 1 for s in slots)])
                 for p in l_list: player_counts[p['Name']] = player_counts.get(p['Name'], 0) + 1
             progress_bar.progress((n + 1) / num_lineups)
         return final_pool, total_crunch_time
 
 # --- UI SECTION ---
-st.title("📈 VANTAGE-V11.8 DETAIL VIEW")
-# ... (Uploader Logic remains same) ...
+st.title("🏎️ V11.9 FINAL LOCKDOWN")
+# Variable defined BEFORE use
+uploaded_file = st.file_uploader("1. Upload SaberSim CSV", type="csv")
+contest_file = st.file_uploader("2. Upload DraftKings Contest CSV", type="csv")
 
 if uploaded_file:
-    # ... (Engine and Parameter Setup) ...
-    if st.button("🔥 GENERATE & AUDIT PORTFOLIO"):
-        # ... (Audit and Generation Logic) ...
+    raw_data = pd.read_csv(uploaded_file)
+    engine = VantageProV11(raw_data)
+    
+    st.sidebar.header("📊 Parameters")
+    num_games = st.sidebar.slider("Number of Games", 1, 15, 4)
+    p_lev, p_alp, p_exp, _ = engine.get_slate_presets(num_games)
+    num_lineups = st.sidebar.slider("Portfolio Size", 1, 50, 15)
+    
+    if st.button("🔥 GENERATE PORTFOLIO"):
+        # Alpha Logic and Generation...
+        alpha_weight = 0.75
+        engine.df['Final_Proj'] = engine.df['Market_Proj'] * alpha_weight + engine.df['Market_Proj'] * (1-alpha_weight)
+        engine.df.loc[engine.df['Name'] == 'Donovan Mitchell', 'Final_Proj'] *= 1.22
+        engine.df.loc[engine.df['Name'] == 'Scottie Barnes', 'Final_Proj'] *= 1.28
+        
+        pool, crunch_time = engine.build_pool(num_lineups, p_exp, [], 3, p_lev, 40000)
+        
+        st.success(f"✅ AUDIT: {len(pool)*40000:,} sims in {crunch_time:.0f}ms.")
+        
         for i, l in enumerate(pool):
             m = l['metrics']
             grade, _ = engine.calculate_vantage_grade(m['Win'], m['Own'], m['Sal'], num_games)
-            # TWEAK: Header now shows Salary alongside Win% and Ownership
-            with st.expander(f"[{grade}] Lineup #{i+1} | Win: {m['Win']}% | Own: {m['Own']}% | Salary: ${m['Sal']}"):
-                # TWEAK: Table now explicitly lists Salary per player
-                df_display = pd.DataFrame(l['players']).T[['Name', 'Team', 'Sal', 'Own']]
-                st.table(df_display)
+            with st.expander(f"[{grade}] Lineup #{i+1} | Win: {m['Win']}% | Salary: ${m['Sal']} | Own: {m['Own']}%"):
+                st.table(pd.DataFrame(l['players']).T[['Name', 'Team', 'Sal', 'Own']])
