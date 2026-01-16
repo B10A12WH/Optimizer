@@ -5,7 +5,7 @@ import pulp
 import io
 import time
 
-st.set_page_config(page_title="V11.3 LOCKDOWN PRO", layout="wide", page_icon="🏎️")
+st.set_page_config(page_title="V11.5 PORTFOLIO MANAGER", layout="wide", page_icon="📈")
 
 class VantageProV11:
     def __init__(self, df):
@@ -23,14 +23,12 @@ class VantageProV11:
         return 1.10, 0.75, 0.55, 1
 
     def calculate_vantage_grade(self, win_pct, total_own, total_sal, num_games):
-        """THE GRADER: Evaluating portfolio efficiency and ceiling."""
         if num_games <= 5:
             ceiling = min(win_pct * 28, 45)
             leverage = 35 if 60 <= total_own <= 95 else 25
         else:
             ceiling = min(win_pct * 12, 45)
             leverage = 35 if 75 <= total_own <= 110 else 20
-        
         score = ceiling + leverage + ((total_sal / 50000) * 20)
         grades = [(86, "A+"), (78, "A"), (70, "B+"), (62, "B"), (54, "C")]
         for threshold, label in grades:
@@ -38,47 +36,40 @@ class VantageProV11:
         return "D", score
 
     def simulate_win_pct_institutional(self, lineup_players, num_sims):
-        """V11: Usage Cannibalism Logic (Inverse Correlation)"""
+        start_time = time.time()
         projs = np.array([p['Final_Proj'] for p in lineup_players])
         teams = np.array([p['Team'] for p in lineup_players])
         player_variance = np.random.normal(1.0, 0.20, (num_sims, 8))
-        
-        # Inverse Correlation Logic
         for team in np.unique(teams):
             teammate_indices = np.where(teams == team)[0]
             if len(teammate_indices) > 1:
                 boom_mask = player_variance[:, teammate_indices[0]] > 1.25
                 for other_idx in teammate_indices[1:]:
                     player_variance[boom_mask, other_idx] *= 0.88 
-
         sim_results = np.sum(projs * player_variance, axis=1)
         target = 295 
         wins = np.sum(sim_results >= target)
-        return (wins / num_sims) * 100
+        elapsed = (time.time() - start_time) * 1000 
+        return (wins / num_sims) * 100, np.mean(sim_results), elapsed
 
     def build_pool(self, num_lineups, exp_limit, late_teams, team_limit, leverage_weight, sim_strength):
         LATE_TEAMS = late_teams if late_teams else ['CHI', 'BKN', 'LAC', 'TOR']
         self.df['Is_Late'] = self.df['Team'].apply(lambda x: 1 if x in LATE_TEAMS else 0)
-        
         final_pool, player_counts, indices_store = [], {}, []
+        total_crunch_time = 0
         progress_bar = st.progress(0)
-        
         for n in range(num_lineups):
             sim_df = self.df.copy()
             sim_df['Sim'] = sim_df['Final_Proj'] * np.random.normal(1, 0.12, len(sim_df))
             sim_df['Shark_Score'] = (sim_df['Sim']**3) / (1 + ((sim_df['Own'] / 100) * leverage_weight))
-            
             prob = pulp.LpProblem(f"V11_{n}", pulp.LpMaximize)
             slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
             choices = pulp.LpVariable.dicts("C", (sim_df.index, slots), cat='Binary')
-            
             prob += pulp.lpSum([sim_df.loc[i, 'Shark_Score'] * choices[i][s] for i in sim_df.index for s in slots])
             prob += pulp.lpSum([sim_df.loc[i, 'Sal'] * choices[i][s] for i in sim_df.index for s in slots]) <= 50000
             prob += pulp.lpSum([sim_df.loc[i, 'Sal'] * choices[i][s] for i in sim_df.index for s in slots]) >= 49500
-            
             if any(sim_df['Is_Late'] == 1):
                 prob += pulp.lpSum([choices[i]['UTIL'] for i in sim_df.index if sim_df.loc[i, 'Is_Late'] == 1]) == 1
-            
             for s in slots: prob += pulp.lpSum([choices[i][s] for i in sim_df.index]) == 1
             for i in sim_df.index: prob += pulp.lpSum([choices[i][s] for s in slots]) <= 1
             for t in sim_df['Team'].unique():
@@ -87,67 +78,74 @@ class VantageProV11:
             for i in sim_df.index:
                 if player_counts.get(sim_df.loc[i, 'Name'], 0) >= (num_lineups * exp_limit):
                     prob += pulp.lpSum([choices[i][s] for s in slots]) == 0
-            
             for i in sim_df.index:
                 p_pos = str(sim_df.loc[i, 'Pos'])
                 for s in slots:
                     eligible = (s == 'UTIL') or (s == 'PG' and 'PG' in p_pos) or (s == 'SG' and 'SG' in p_pos) or (s == 'SF' and 'SF' in p_pos) or (s == 'PF' and 'PF' in p_pos) or (s == 'C' and 'C' in p_pos) or (s == 'G' and ('PG' in p_pos or 'SG' in p_pos)) or (s == 'F' and ('SF' in p_pos or 'PF' in p_pos))
                     if not eligible: prob += choices[i][s] == 0
-
             prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=5))
             if pulp.LpStatus[prob.status] == 'Optimal':
                 l_list = [sim_df.loc[i] for s in slots for i in sim_df.index if choices[i][s].varValue == 1]
-                win_pct = self.simulate_win_pct_institutional(l_list, sim_strength)
-                total_own = sum([p['Own'] for p in l_list])
-                total_sal = sum([p['Sal'] for p in l_list])
-                final_pool.append({'players': {slots[k]: l_list[k] for k in range(8)}, 'metrics': {'Win': round(win_pct, 2), 'Own': round(total_own, 1), 'Sal': total_sal}})
+                win_pct, avg_score, ms = self.simulate_win_pct_institutional(l_list, sim_strength)
+                total_crunch_time += ms
+                final_pool.append({'players': {slots[k]: l_list[k] for k in range(8)}, 'metrics': {'Win': round(win_pct, 2), 'Own': round(sum([p['Own'] for p in l_list]), 1), 'Sal': sum([p['Sal'] for p in l_list])}})
                 indices_store.append([i for i in sim_df.index if any(choices[i][s].varValue == 1 for s in slots)])
                 for p in l_list: player_counts[p['Name']] = player_counts.get(p['Name'], 0) + 1
             progress_bar.progress((n + 1) / num_lineups)
-        return final_pool
-
-    def generate_proprietary_projections(self, alpha_weight, usage_boosts):
-        def blend(row):
-            boost = usage_boosts.get(row['Name'], 1.0)
-            return (row['Market_Proj'] * boost * alpha_weight) + (row['Market_Proj'] * (1 - alpha_weight))
-        self.df['Final_Proj'] = self.df.apply(blend, axis=1)
+        return final_pool, total_crunch_time
 
 # --- UI SECTION ---
-st.title("🏎️ VANTAGE-V11.3 LOCKDOWN PRO")
-uploaded_file = st.file_uploader("Upload SaberSim CSV", type="csv")
+st.title("📈 VANTAGE-V11.5 PORTFOLIO MANAGER")
+col_a, col_b = st.columns(2)
+with col_a:
+    uploaded_file = st.file_uploader("1. Upload SaberSim CSV (Data)", type="csv")
+with col_b:
+    contest_file = st.file_uploader("2. Upload DraftKings Contest CSV (Optional Ledger)", type="csv")
 
 if uploaded_file:
     raw_data = pd.read_csv(uploaded_file)
-    st.info(f"📋 System Online. {len(raw_data)} assets in pool.")
     engine = VantageProV11(raw_data)
     
-    st.sidebar.header("📊 Portfolio Scope")
-    num_games = st.sidebar.slider("Number of Games in Slate", 1, 15, 4)
+    st.sidebar.header("📊 Parameters")
+    num_games = st.sidebar.slider("Number of Games", 1, 15, 4)
     p_lev, p_alp, p_exp, _ = engine.get_slate_presets(num_games)
     num_lineups = st.sidebar.slider("Portfolio Size", 1, 50, 15)
-    late_teams = st.sidebar.multiselect("Late Games (7:30 PM)", sorted(raw_data['Team'].unique()), default=['CHI', 'BKN', 'LAC', 'TOR'])
     
-    with st.sidebar.expander("🛠️ Advanced Quant Knobs"):
-        sim_strength = st.select_slider("Sim Strength", options=[1000, 5000, 10000, 40000], value=40000)
-        leverage_weight = st.slider("Leverage (Shark) Strength", 0.0, 2.0, p_lev)
-        alpha_weight = st.slider("Alpha Blend Weight", 0.0, 1.0, p_alp)
-        team_limit = st.slider("Max Per Team", 1, 4, 3)
-        exp_limit = st.slider("Exposure Cap", 0.1, 1.0, p_exp)
+    if st.button("🔥 GENERATE & AUDIT PORTFOLIO"):
+        alpha_weight = 0.75
+        engine.df['Final_Proj'] = engine.df['Market_Proj'] * alpha_weight + engine.df['Market_Proj'] * (1-alpha_weight)
+        engine.df.loc[engine.df['Name'] == 'Donovan Mitchell', 'Final_Proj'] *= 1.22
+        engine.df.loc[engine.df['Name'] == 'Scottie Barnes', 'Final_Proj'] *= 1.28
+        
+        pool, crunch_time = engine.build_pool(num_lineups, p_exp, [], 3, p_lev, 40000)
+        
+        st.success(f"✅ AUDIT: {len(pool)*40000:,} sims completed in {crunch_time:.0f}ms.")
 
-    st.sidebar.header("🔭 Alpha Vision")
-    mitchell_b = st.sidebar.slider("Mitchell Boost", 1.0, 1.5, 1.22)
-    barnes_b = st.sidebar.slider("Barnes Boost", 1.0, 1.5, 1.28)
-    
-    if st.button("🔥 GENERATE HIGH-FIDELITY PORTFOLIO"):
-        with st.spinner(f"Running {num_lineups * sim_strength:,} simulations..."):
-            engine.generate_proprietary_projections(alpha_weight, {'Donovan Mitchell': mitchell_b, 'Scottie Barnes': barnes_b})
-            pool = engine.build_pool(num_lineups, exp_limit, late_teams, team_limit, leverage_weight, sim_strength)
+        # --- EXPORT LOGIC ---
+        export_data = []
+        for i, l in enumerate(pool):
+            row = {s: l['players'][s]['Name'] for s in ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']}
+            export_data.append(row)
+        
+        export_df = pd.DataFrame(export_data)
+
+        if contest_file:
+            # PROFESSIONAL MAPPING: Merging lineups into DK Ledger
+            contest_df = pd.read_csv(contest_file)
+            for i in range(min(len(export_df), len(contest_df))):
+                for slot in ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']:
+                    contest_df.at[i, slot] = export_df.at[i, slot]
             
-            if not pool:
-                st.error("❌ Optimization failed. Loosen constraints.")
-            else:
-                for i, l in enumerate(pool):
-                    m = l['metrics']
-                    grade, _ = engine.calculate_vantage_grade(m['Win'], m['Own'], m['Sal'], num_games)
-                    with st.expander(f"[{grade}] Lineup #{i+1} | Win%: {m['Win']}% | Own: {m['Own']}% | Sal: ${m['Sal']}"):
-                        st.table(pd.DataFrame(l['players']).T[['Name', 'Team', 'Sal', 'Own']])
+            csv_buffer = io.StringIO()
+            contest_df.to_csv(csv_buffer, index=False)
+            st.download_button("💾 DOWNLOAD DK EDIT FILE", data=csv_buffer.getvalue(), file_name="dk_bulk_edit.csv", mime="text/csv")
+        else:
+            csv_buffer = io.StringIO()
+            export_df.to_csv(csv_buffer, index=False)
+            st.download_button("💾 DOWNLOAD STANDALONE LINEUPS", data=csv_buffer.getvalue(), file_name="vantage_lineups.csv", mime="text/csv")
+
+        for i, l in enumerate(pool):
+            m = l['metrics']
+            grade, _ = engine.calculate_vantage_grade(m['Win'], m['Own'], m['Sal'], num_games)
+            with st.expander(f"[{grade}] Lineup #{i+1} | Win: {m['Win']}% | Own: {m['Own']}%"):
+                st.table(pd.DataFrame(l['players']).T[['Name', 'Team', 'Sal', 'Own']])
