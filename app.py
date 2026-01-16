@@ -5,11 +5,10 @@ import pulp
 import io
 import time
 
-st.set_page_config(page_title="VANTAGE V12.1 FULL STACK", layout="wide", page_icon="🏎️")
+st.set_page_config(page_title="VANTAGE V12.2 TOTAL PACKAGE", layout="wide", page_icon="🏎️")
 
 class VantageMaster:
     def __init__(self, df):
-        # 1. DATA INTEGRITY LAYER
         self.raw_df = df.copy()
         self.raw_df.columns = [c.strip() for c in self.raw_df.columns]
         mapping = {'Name':'Name', 'Salary':'Sal', 'dk_points':'Market_Proj', 'Adj Own':'Own', 'Pos':'Pos', 'Team':'Team'}
@@ -19,7 +18,13 @@ class VantageMaster:
                 self.raw_df[col] = pd.to_numeric(self.raw_df[col], errors='coerce').fillna(0 if col != 'Own' else 5)
         self.df = self.raw_df.copy()
 
-    # 2. PROPRIETARY GRADER LOGIC
+    # --- RESTORED PROPRIETARY METHOD ---
+    def generate_proprietary_projections(self, alpha_weight, usage_boosts):
+        def blend(row):
+            boost = usage_boosts.get(row['Name'], 1.0)
+            return (row['Market_Proj'] * boost * alpha_weight) + (row['Market_Proj'] * (1 - alpha_weight))
+        self.df['Final_Proj'] = self.df.apply(blend, axis=1)
+
     def calculate_vantage_grade(self, win_pct, total_own, total_sal, num_games):
         ceiling = min(win_pct * 28, 45) if num_games <= 5 else min(win_pct * 12, 45)
         leverage = 35 if (num_games <= 5 and 60 <= total_own <= 95) or (num_games > 5 and 75 <= total_own <= 110) else 25
@@ -29,14 +34,11 @@ class VantageMaster:
             if score >= threshold: return label, score
         return "D", score
 
-    # 3. USAGE CANNIBALISM & SIM ENGINE
     def simulate_win_pct_vectorized(self, lineup_players, num_sims):
         start_time = time.time()
         projs = np.array([p['Final_Proj'] for p in lineup_players])
         teams = np.array([p['Team'] for p in lineup_players])
-        # Generate Matrix
         player_variance = np.random.normal(1.0, 0.20, (num_sims, 8))
-        # Apply Inverse Correlation (Cannibalism)
         for team in np.unique(teams):
             teammate_indices = np.where(teams == team)[0]
             if len(teammate_indices) > 1:
@@ -49,7 +51,6 @@ class VantageMaster:
         elapsed = (time.time() - start_time) * 1000 
         return (wins / num_sims) * 100, np.mean(sim_results), elapsed
 
-    # 4. LINEAR PROGRAMMING OPTIMIZER
     def build_pool(self, num_lineups, exp_limit, late_teams, team_limit, leverage_weight, sim_strength):
         LATE_TEAMS = late_teams if late_teams else ['CHI', 'BKN', 'LAC', 'TOR']
         self.df['Is_Late'] = self.df['Team'].apply(lambda x: 1 if x in LATE_TEAMS else 0)
@@ -63,17 +64,11 @@ class VantageMaster:
             prob = pulp.LpProblem(f"V12_{n}", pulp.LpMaximize)
             slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
             choices = pulp.LpVariable.dicts("C", (sim_df.index, slots), cat='Binary')
-            
-            # Objective & Primary Constraints
             prob += pulp.lpSum([sim_df.loc[i, 'Shark_Score'] * choices[i][s] for i in sim_df.index for s in slots])
             prob += pulp.lpSum([sim_df.loc[i, 'Sal'] * choices[i][s] for i in sim_df.index for s in slots]) <= 50000
             prob += pulp.lpSum([sim_df.loc[i, 'Sal'] * choices[i][s] for i in sim_df.index for s in slots]) >= 49500
-            
-            # LATE SWAP MANDATE
             if any(sim_df['Is_Late'] == 1):
                 prob += pulp.lpSum([choices[i]['UTIL'] for i in sim_df.index if sim_df.loc[i, 'Is_Late'] == 1]) == 1
-            
-            # Slot & Uniqueness Constraints
             for s in slots: prob += pulp.lpSum([choices[i][s] for i in sim_df.index]) == 1
             for i in sim_df.index: prob += pulp.lpSum([choices[i][s] for s in slots]) <= 1
             for t in sim_df['Team'].unique():
@@ -82,13 +77,11 @@ class VantageMaster:
             for i in sim_df.index:
                 if player_counts.get(sim_df.loc[i, 'Name'], 0) >= (num_lineups * exp_limit):
                     prob += pulp.lpSum([choices[i][s] for s in slots]) == 0
-            # Position Eligibility
             for i in sim_df.index:
                 p_pos = str(sim_df.loc[i, 'Pos'])
                 for s in slots:
                     eligible = (s == 'UTIL') or (s == 'PG' and 'PG' in p_pos) or (s == 'SG' and 'SG' in p_pos) or (s == 'SF' and 'SF' in p_pos) or (s == 'PF' and 'PF' in p_pos) or (s == 'C' and 'C' in p_pos) or (s == 'G' and ('PG' in p_pos or 'SG' in p_pos)) or (s == 'F' and ('SF' in p_pos or 'PF' in p_pos))
                     if not eligible: prob += choices[i][s] == 0
-
             prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=5))
             if pulp.LpStatus[prob.status] == 'Optimal':
                 l_list = [sim_df.loc[i] for s in slots for i in sim_df.index if choices[i][s].varValue == 1]
@@ -101,25 +94,23 @@ class VantageMaster:
         return final_pool, total_crunch_time
 
 # --- UI LAYER ---
-st.title("📈 VANTAGE MASTER V12.1")
-c1, c2 = st.columns(2)
-with c1: f1 = st.file_uploader("1. SaberSim CSV", type="csv")
-with c2: f2 = st.file_uploader("2. DK Contest CSV", type="csv")
+st.title("📈 VANTAGE MASTER V12.2")
+f1 = st.file_uploader("1. SaberSim CSV", type="csv")
+f2 = st.file_uploader("2. DK Contest CSV", type="csv")
 
 if f1:
     raw = pd.read_csv(f1)
     engine = VantageMaster(raw)
-    st.sidebar.header("📊 Parameters")
     num_games = st.sidebar.slider("Number of Games", 1, 15, 4)
     num_lineups = st.sidebar.slider("Portfolio Size", 1, 50, 15)
     
     if st.button("🔥 EXECUTE FULL STACK AUDIT"):
+        # Correctly calling the restored method
         engine.generate_proprietary_projections(0.75, {'Donovan Mitchell': 1.22, 'Scottie Barnes': 1.28})
         pool, crunch = engine.build_pool(num_lineups, 0.45, [], 3, 1.45, 40000)
         
         st.success(f"✅ AUDIT: {len(pool)*40000:,} Matrix Iterations verified in {crunch:.0f}ms.")
         
-        # 5. CONTEST LEDGER MAPPING
         if f2:
             try:
                 content = f2.getvalue().decode('utf-8').splitlines()
@@ -132,7 +123,6 @@ if f1:
                 st.download_button("💾 DOWNLOAD DK BULK EDIT", data=contest_df.to_csv(index=False), file_name="dk_edit.csv")
             except: st.error("Contest CSV format error.")
 
-        # 6. PORTFOLIO DETAIL DISPLAY
         for i, l in enumerate(pool):
             m = l['metrics']
             grade, _ = engine.calculate_vantage_grade(m['Win'], m['Own'], m['Sal'], num_games)
