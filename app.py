@@ -4,8 +4,8 @@ import numpy as np
 import pulp
 import io
 
-# --- VANTAGE-V5.4 PRO: FULL SYSTEM REFRESH ---
-st.set_page_config(page_title="VANTAGE-V5.4 PRO", layout="wide", page_icon="🏆")
+# --- VANTAGE-V5.5 PRO: AUTO-AUDIT EDITION ---
+st.set_page_config(page_title="VANTAGE-V5.5 PRO", layout="wide", page_icon="🏆")
 
 class VantageProV5:
     def __init__(self, df):
@@ -30,32 +30,25 @@ class VantageProV5:
             if col in self.raw_df.columns:
                 self.raw_df[col] = pd.to_numeric(self.raw_df[col], errors='coerce').fillna(0 if col != 'Own' else 5)
 
-    def get_auto_scrubs(self, manual_scrubs):
+    def get_auto_scrubs(self):
         """Rule-based Automation: Scans for 'Out' status and zero projections."""
-        # 1. Detect official injury tags in CSV
+        # 1. Detect official injury tags in CSV ('O', 'OUT', 'INJ')
         csv_outs = self.raw_df[self.raw_df['Status'].isin(['O', 'OUT', 'INJ'])]['Name'].tolist()
         
         # 2. Detect players with zeroed-out projections (Market reaction)
         zero_proj = self.raw_df[self.raw_df['Market_Proj'] <= 0]['Name'].tolist()
         
-        # 3. Combine with manual user selections
-        combined = list(set(csv_outs + zero_proj + manual_scrubs))
-        return combined
+        # 3. Combine and remove duplicates
+        return list(set(csv_outs + zero_proj))
 
     def calculate_vantage_grade(self, win_pct, total_own, total_sal):
-        """Proprietary Lineup Grader: Authenticity & Quality Audit."""
-        # Ceiling Score (Win Probability) - 45% Weight
+        """Proprietary Lineup Grader: Quality Audit."""
         ceiling = min(win_pct * 12, 45) 
-        
-        # Leverage Score (Ownership) - 35% Weight
-        if total_own < 70: leverage = 20 # High Risk / Low Volume
-        elif 70 <= total_own <= 105: leverage = 35 # GPP Sweet Spot
-        elif 105 < total_own <= 130: leverage = 25 # Balanced/Chalky
-        else: leverage = 10 # Overly Chalky
-        
-        # Efficiency Score (Salary Usage) - 20% Weight
+        if total_own < 70: leverage = 20
+        elif 70 <= total_own <= 105: leverage = 35 
+        elif 105 < total_own <= 130: leverage = 25 
+        else: leverage = 10 
         efficiency = (total_sal / 50000) * 20
-        
         score = ceiling + leverage + efficiency
         
         if score >= 90: return "A+", score
@@ -89,8 +82,6 @@ class VantageProV5:
         for n in range(num_lineups):
             sim_df = filtered_df.copy()
             sim_df['Sim'] = sim_df['Final_Proj'] * np.random.normal(1, 0.18, len(sim_df))
-            
-            # Calibrated Leverage (Normalizing Own to Decimal)
             sim_df['Lev_Fact'] = 1 + ((sim_df['Own'] / 100) * leverage_weight)
             sim_df['Shark_Score'] = (sim_df['Sim']**3) / sim_df['Lev_Fact']
             
@@ -105,16 +96,13 @@ class VantageProV5:
             for s in slots: prob += pulp.lpSum([choices[i][s] for i in sim_df.index]) == 1
             for i in sim_df.index: prob += pulp.lpSum([choices[i][s] for s in slots]) <= 1
             
-            # Diversity Rule (Max 5 player overlap)
             for prev in indices_store:
                 prob += pulp.lpSum([choices[i][s] for i in prev for s in slots]) <= 5
 
-            # Exposure Limits
             for i in sim_df.index:
                 if player_counts.get(sim_df.loc[i, 'Name'], 0) >= (num_lineups * exp_limit):
                     prob += pulp.lpSum([choices[i][s] for s in slots]) == 0
             
-            # Position Rules
             for i in sim_df.index:
                 p_pos = str(sim_df.loc[i, 'Pos'])
                 for s in slots:
@@ -148,8 +136,7 @@ class VantageProV5:
                 curr_idx = [i for i in sim_df.index if any(choices[i][s].varValue == 1 for s in slots)]
                 indices_store.append(curr_idx)
                 for i in curr_idx:
-                    name = sim_df.loc[i, 'Name']
-                    player_counts[name] = player_counts.get(name, 0) + 1
+                    player_counts[sim_df.loc[i, 'Name']] = player_counts.get(sim_df.loc[i, 'Name'], 0) + 1
             progress_bar.progress((n + 1) / num_lineups)
             
         return final_pool
@@ -169,18 +156,18 @@ if uploaded_file:
     leverage_weight = st.sidebar.slider("Leverage Strength", 0.0, 2.0, 1.15)
     exp_limit = st.sidebar.slider("Exposure Cap", 0.1, 1.0, 0.5)
     
-    manual_scrubs = st.sidebar.multiselect("🚫 Manual Scratches", sorted(raw_data['Name'].unique().tolist()))
+    # Manual Scrubs removed as per request - Automation takes the wheel
     mitchell_b = st.sidebar.slider("Mitchell Boost", 1.0, 1.5, 1.22)
     barnes_b = st.sidebar.slider("Barnes Boost", 1.0, 1.5, 1.28)
     
     if st.button("🔥 GENERATE PORTFOLIO"):
-        # Run Auto-Scrub automation
-        final_scrubs = engine.get_auto_scrubs(manual_scrubs)
-        st.info(f"🤖 Automation: Scrubbed {len(final_scrubs)} players based on CSV status and projections.")
+        # Run Auto-Audit automation
+        auto_scrubs = engine.get_auto_scrubs()
+        st.info(f"🤖 Auto-Audit: {len(auto_scrubs)} players scrubbed (Official 'OUT' status or 0.0 Proj).")
         
         with st.status("Simulating Outcomes...", expanded=True) as status:
             engine.generate_proprietary_projections(alpha_weight, {'Donovan Mitchell': mitchell_b, 'Scottie Barnes': barnes_b})
-            pool = engine.build_pool(num_lineups, exp_limit, final_scrubs, leverage_weight, min_sal)
+            pool = engine.build_pool(num_lineups, exp_limit, auto_scrubs, leverage_weight, min_sal)
             status.update(label="Portfolio Ready!", state="complete", expanded=False)
         
         # Exposure Summary
