@@ -4,7 +4,7 @@ import numpy as np
 import pulp
 import io
 
-st.set_page_config(page_title="VANTAGE-V5 PRO", layout="wide", page_icon="🚀")
+st.set_page_config(page_title="VANTAGE-V5.1 PRO", layout="wide", page_icon="🚀")
 
 class VantageProV5:
     def __init__(self, df):
@@ -34,11 +34,19 @@ class VantageProV5:
         self.df['Final_Proj'] = self.df.apply(blend, axis=1)
 
     def simulate_win_pct(self, lineup_players):
-        sims = 100
+        sims = 150 # Increased for better accuracy
         scores = [sum([p['Final_Proj'] * np.random.normal(1.0, 0.22) for p in lineup_players]) for _ in range(sims)]
-        target_score = 265 
+        
+        # --- RECALIBRATED: TARGETING THE TAKEDOWN ---
+        # 305 is a realistic GPP winning score for a mid-sized slate.
+        # This will lower the % but make it much more meaningful.
+        target_score = 305 
+        
         wins = sum(1 for s in scores if s >= target_score)
-        if wins == 0: return round(max(scores) / 3, 2)
+        # Fallback: If 0 wins, show how close it got to the ceiling
+        if wins == 0:
+            return round((max(scores) / target_score) * 0.5, 2) 
+            
         return (wins / sims) * 100
 
     def build_pool(self, num_lineups, exp_limit, scrub_list, leverage_weight):
@@ -50,8 +58,7 @@ class VantageProV5:
             sim_df = filtered_df.copy()
             sim_df['Sim'] = sim_df['Final_Proj'] * np.random.normal(1, 0.18, len(sim_df))
             
-            # --- CALIBRATED LEVERAGE LOGIC ---
-            # Instead of +1, we use (Own/100) * leverage_weight to keep stars viable
+            # Calibrated Leverage Factor
             sim_df['Leverage_Factor'] = 1 + ((sim_df['Own'] / 100) * leverage_weight)
             sim_df['Shark_Score'] = (sim_df['Sim']**3) / sim_df['Leverage_Factor']
             
@@ -90,28 +97,30 @@ class VantageProV5:
         return final_pool
 
 # --- UI ---
-st.title("🚀 VANTAGE-V5: PROPRIETARY SIMULATOR")
-uploaded_file = st.file_uploader("Upload CSV", type="csv")
+st.title("🚀 VANTAGE-V5.1: THE ARCHITECT")
+uploaded_file = st.file_uploader("Upload SaberSim CSV", type="csv")
 
 if uploaded_file:
     raw_data = pd.read_csv(uploaded_file)
     engine = VantageProV5(raw_data)
     
-    st.sidebar.header("🕹️ Proprietary Controls")
-    alpha_weight = st.sidebar.slider("Alpha System Weight", 0.0, 1.0, 0.7)
+    st.sidebar.header("🕹️ Architect Controls")
+    # --- NEW: LINEUP NUMBER SLIDER ---
+    num_lineups = st.sidebar.slider("Number of Lineups", 1, 50, 15)
     
-    # --- NEW: LEVERAGE SLIDER ---
-    leverage_weight = st.sidebar.slider("Leverage Strength (Ownership Penalty)", 0.0, 2.0, 0.5)
+    alpha_weight = st.sidebar.slider("Alpha System Weight", 0.0, 1.0, 0.7)
+    leverage_weight = st.sidebar.slider("Leverage Strength", 0.0, 2.0, 0.5)
+    exp_limit = st.sidebar.slider("Global Exposure Cap", 0.1, 1.0, 0.6)
     
     scrub_list = st.sidebar.multiselect("🚫 Scrub OUT", sorted(raw_data['Name'].unique().tolist()))
-    mitchell_b = st.sidebar.slider("Mitchell Boost", 1.0, 1.5, 1.18)
-    barnes_b = st.sidebar.slider("Barnes Boost", 1.0, 1.5, 1.25)
+    mitchell_b = st.sidebar.slider("Mitchell Boost", 1.0, 1.5, 1.22)
+    barnes_b = st.sidebar.slider("Barnes Boost", 1.0, 1.5, 1.28)
     
-    if st.button("🔥 RUN SIMULATION"):
-        with st.status("Simulating...", expanded=True) as status:
+    if st.button("🔥 GENERATE PORTFOLIO"):
+        with st.status("Simulating and Optimizing...", expanded=True) as status:
             engine.generate_proprietary_projections(alpha_weight, {'Donovan Mitchell': mitchell_b, 'Scottie Barnes': barnes_b})
-            pool = engine.build_pool(15, 0.60, scrub_list, leverage_weight)
-            status.update(label="Complete!", state="complete", expanded=False)
+            pool = engine.build_pool(num_lineups, exp_limit, scrub_list, leverage_weight)
+            status.update(label="Portfolio Generated!", state="complete", expanded=False)
         
         for i, l in enumerate(pool):
             m = l['metrics']
@@ -123,4 +132,4 @@ if uploaded_file:
         export_df = pd.DataFrame(export_rows, columns=['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL'])
         csv_buffer = io.StringIO()
         export_df.to_csv(csv_buffer, index=False)
-        st.download_button("💾 Download DK CSV", data=csv_buffer.getvalue(), file_name="vantage_lock.csv", mime="text/csv")
+        st.download_button("💾 Download DK Upload File", data=csv_buffer.getvalue(), file_name="vantage_lock.csv", mime="text/csv")
