@@ -5,13 +5,12 @@ import pulp
 import io
 import time
 
-st.set_page_config(page_title="V11.2 LOCKDOWN PRO", layout="wide", page_icon="🏎️")
+st.set_page_config(page_title="V11.3 LOCKDOWN PRO", layout="wide", page_icon="🏎️")
 
 class VantageProV11:
     def __init__(self, df):
         self.raw_df = df.copy()
         self.raw_df.columns = [c.strip() for c in self.raw_df.columns]
-        # Professional Mapping for SaberSim CSV
         mapping = {'Name':'Name', 'Salary':'Sal', 'dk_points':'Market_Proj', 'Adj Own':'Own', 'Pos':'Pos', 'Team':'Team'}
         self.raw_df = self.raw_df.rename(columns=mapping)
         for col in ['Sal', 'Market_Proj', 'Own']:
@@ -19,13 +18,32 @@ class VantageProV11:
                 self.raw_df[col] = pd.to_numeric(self.raw_df[col], errors='coerce').fillna(0 if col != 'Own' else 5)
         self.df = self.raw_df.copy()
 
+    def get_slate_presets(self, num_games):
+        if num_games <= 4: return 1.45, 0.80, 0.45, 2
+        return 1.10, 0.75, 0.55, 1
+
+    def calculate_vantage_grade(self, win_pct, total_own, total_sal, num_games):
+        """THE GRADER: Evaluating portfolio efficiency and ceiling."""
+        if num_games <= 5:
+            ceiling = min(win_pct * 28, 45)
+            leverage = 35 if 60 <= total_own <= 95 else 25
+        else:
+            ceiling = min(win_pct * 12, 45)
+            leverage = 35 if 75 <= total_own <= 110 else 20
+        
+        score = ceiling + leverage + ((total_sal / 50000) * 20)
+        grades = [(86, "A+"), (78, "A"), (70, "B+"), (62, "B"), (54, "C")]
+        for threshold, label in grades:
+            if score >= threshold: return label, score
+        return "D", score
+
     def simulate_win_pct_institutional(self, lineup_players, num_sims):
-        """Usage Cannibalism Logic (Inverse Correlation)"""
+        """V11: Usage Cannibalism Logic (Inverse Correlation)"""
         projs = np.array([p['Final_Proj'] for p in lineup_players])
         teams = np.array([p['Team'] for p in lineup_players])
         player_variance = np.random.normal(1.0, 0.20, (num_sims, 8))
         
-        # Inverse Correlation Logic: Boom for one = Penalty for others on same team
+        # Inverse Correlation Logic
         for team in np.unique(teams):
             teammate_indices = np.where(teams == team)[0]
             if len(teammate_indices) > 1:
@@ -47,9 +65,7 @@ class VantageProV11:
         
         for n in range(num_lineups):
             sim_df = self.df.copy()
-            # Stochastic Game Sample
             sim_df['Sim'] = sim_df['Final_Proj'] * np.random.normal(1, 0.12, len(sim_df))
-            # The Shark Leverage Formula
             sim_df['Shark_Score'] = (sim_df['Sim']**3) / (1 + ((sim_df['Own'] / 100) * leverage_weight))
             
             prob = pulp.LpProblem(f"V11_{n}", pulp.LpMaximize)
@@ -58,9 +74,8 @@ class VantageProV11:
             
             prob += pulp.lpSum([sim_df.loc[i, 'Shark_Score'] * choices[i][s] for i in sim_df.index for s in slots])
             prob += pulp.lpSum([sim_df.loc[i, 'Sal'] * choices[i][s] for i in sim_df.index for s in slots]) <= 50000
-            prob += pulp.lpSum([sim_df.loc[i, 'Sal'] * choices[i][s] for i in sim_df.index for s in slots]) >= 49200
+            prob += pulp.lpSum([sim_df.loc[i, 'Sal'] * choices[i][s] for i in sim_df.index for s in slots]) >= 49500
             
-            # Late-Swap Logic: Mandate Late UTIL
             if any(sim_df['Is_Late'] == 1):
                 prob += pulp.lpSum([choices[i]['UTIL'] for i in sim_df.index if sim_df.loc[i, 'Is_Late'] == 1]) == 1
             
@@ -73,7 +88,6 @@ class VantageProV11:
                 if player_counts.get(sim_df.loc[i, 'Name'], 0) >= (num_lineups * exp_limit):
                     prob += pulp.lpSum([choices[i][s] for s in slots]) == 0
             
-            # Positional Logic
             for i in sim_df.index:
                 p_pos = str(sim_df.loc[i, 'Pos'])
                 for s in slots:
@@ -84,14 +98,22 @@ class VantageProV11:
             if pulp.LpStatus[prob.status] == 'Optimal':
                 l_list = [sim_df.loc[i] for s in slots for i in sim_df.index if choices[i][s].varValue == 1]
                 win_pct = self.simulate_win_pct_institutional(l_list, sim_strength)
-                final_pool.append({'players': {slots[k]: l_list[k] for k in range(8)}, 'metrics': {'Win': round(win_pct, 2), 'Own': sum([p['Own'] for p in l_list]), 'Sal': sum([p['Sal'] for p in l_list])}})
+                total_own = sum([p['Own'] for p in l_list])
+                total_sal = sum([p['Sal'] for p in l_list])
+                final_pool.append({'players': {slots[k]: l_list[k] for k in range(8)}, 'metrics': {'Win': round(win_pct, 2), 'Own': round(total_own, 1), 'Sal': total_sal}})
                 indices_store.append([i for i in sim_df.index if any(choices[i][s].varValue == 1 for s in slots)])
                 for p in l_list: player_counts[p['Name']] = player_counts.get(p['Name'], 0) + 1
             progress_bar.progress((n + 1) / num_lineups)
         return final_pool
 
+    def generate_proprietary_projections(self, alpha_weight, usage_boosts):
+        def blend(row):
+            boost = usage_boosts.get(row['Name'], 1.0)
+            return (row['Market_Proj'] * boost * alpha_weight) + (row['Market_Proj'] * (1 - alpha_weight))
+        self.df['Final_Proj'] = self.df.apply(blend, axis=1)
+
 # --- UI SECTION ---
-st.title("🏎️ VANTAGE-V11.2 LOCKDOWN PRO")
+st.title("🏎️ VANTAGE-V11.3 LOCKDOWN PRO")
 uploaded_file = st.file_uploader("Upload SaberSim CSV", type="csv")
 
 if uploaded_file:
@@ -99,35 +121,33 @@ if uploaded_file:
     st.info(f"📋 System Online. {len(raw_data)} assets in pool.")
     engine = VantageProV11(raw_data)
     
-    st.sidebar.header("📊 Game State")
+    st.sidebar.header("📊 Portfolio Scope")
+    num_games = st.sidebar.slider("Number of Games in Slate", 1, 15, 4)
+    p_lev, p_alp, p_exp, _ = engine.get_slate_presets(num_games)
     num_lineups = st.sidebar.slider("Portfolio Size", 1, 50, 15)
-    late_teams = st.sidebar.multiselect("Late Games (7:30 PM)", ['CLE', 'PHI', 'IND', 'NOP', 'CHI', 'BKN', 'LAC', 'TOR'], default=['CHI', 'BKN', 'LAC', 'TOR'])
+    late_teams = st.sidebar.multiselect("Late Games (7:30 PM)", sorted(raw_data['Team'].unique()), default=['CHI', 'BKN', 'LAC', 'TOR'])
     
     with st.sidebar.expander("🛠️ Advanced Quant Knobs"):
-        sim_strength = st.select_slider("Sim Strength", options=[1000, 5000, 10000, 40000], value=10000)
-        leverage_weight = st.slider("Leverage (Shark) Strength", 0.0, 2.0, 1.2)
-        alpha_weight = st.slider("Alpha Blend Weight", 0.0, 1.0, 0.75)
+        sim_strength = st.select_slider("Sim Strength", options=[1000, 5000, 10000, 40000], value=40000)
+        leverage_weight = st.slider("Leverage (Shark) Strength", 0.0, 2.0, p_lev)
+        alpha_weight = st.slider("Alpha Blend Weight", 0.0, 1.0, p_alp)
         team_limit = st.slider("Max Per Team", 1, 4, 3)
-        exp_limit = st.slider("Exposure Cap", 0.1, 1.0, 0.6)
+        exp_limit = st.slider("Exposure Cap", 0.1, 1.0, p_exp)
 
     st.sidebar.header("🔭 Alpha Vision")
     mitchell_b = st.sidebar.slider("Mitchell Boost", 1.0, 1.5, 1.22)
     barnes_b = st.sidebar.slider("Barnes Boost", 1.0, 1.5, 1.28)
     
     if st.button("🔥 GENERATE HIGH-FIDELITY PORTFOLIO"):
-        with st.spinner("Crunching Usage Cannibalism & Monte Carlo..."):
-            # Blend Projections
-            engine.df['Final_Proj'] = (engine.df['Market_Proj'] * alpha_weight) + (engine.df['Market_Proj'] * (1-alpha_weight))
-            # Apply Vision Boosts
-            engine.df.loc[engine.df['Name'] == 'Donovan Mitchell', 'Final_Proj'] *= mitchell_b
-            engine.df.loc[engine.df['Name'] == 'Scottie Barnes', 'Final_Proj'] *= barnes_b
-            
+        with st.spinner(f"Running {num_lineups * sim_strength:,} simulations..."):
+            engine.generate_proprietary_projections(alpha_weight, {'Donovan Mitchell': mitchell_b, 'Scottie Barnes': barnes_b})
             pool = engine.build_pool(num_lineups, exp_limit, late_teams, team_limit, leverage_weight, sim_strength)
             
             if not pool:
-                st.error("❌ Optimization failed. Loosen constraints (Exposure/Team Limit).")
+                st.error("❌ Optimization failed. Loosen constraints.")
             else:
                 for i, l in enumerate(pool):
                     m = l['metrics']
-                    with st.expander(f"Lineup #{i+1} | Win%: {m['Win']}% | Sal: ${m['Sal']}"):
+                    grade, _ = engine.calculate_vantage_grade(m['Win'], m['Own'], m['Sal'], num_games)
+                    with st.expander(f"[{grade}] Lineup #{i+1} | Win%: {m['Win']}% | Own: {m['Own']}% | Sal: ${m['Sal']}"):
                         st.table(pd.DataFrame(l['players']).T[['Name', 'Team', 'Sal', 'Own']])
