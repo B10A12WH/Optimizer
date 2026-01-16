@@ -5,7 +5,7 @@ import pulp
 import io
 import time
 
-st.set_page_config(page_title="VANTAGE V12.2 TOTAL PACKAGE", layout="wide", page_icon="🏎️")
+st.set_page_config(page_title="V12.3 MANUAL LOCK", layout="wide", page_icon="🏎️")
 
 class VantageMaster:
     def __init__(self, df):
@@ -18,7 +18,6 @@ class VantageMaster:
                 self.raw_df[col] = pd.to_numeric(self.raw_df[col], errors='coerce').fillna(0 if col != 'Own' else 5)
         self.df = self.raw_df.copy()
 
-    # --- RESTORED PROPRIETARY METHOD ---
     def generate_proprietary_projections(self, alpha_weight, usage_boosts):
         def blend(row):
             boost = usage_boosts.get(row['Name'], 1.0)
@@ -52,7 +51,7 @@ class VantageMaster:
         return (wins / num_sims) * 100, np.mean(sim_results), elapsed
 
     def build_pool(self, num_lineups, exp_limit, late_teams, team_limit, leverage_weight, sim_strength):
-        LATE_TEAMS = late_teams if late_teams else ['CHI', 'BKN', 'LAC', 'TOR']
+        LATE_TEAMS = ['CHI', 'BKN', 'LAC', 'TOR']
         self.df['Is_Late'] = self.df['Team'].apply(lambda x: 1 if x in LATE_TEAMS else 0)
         final_pool, player_counts, indices_store, total_crunch_time = [], {}, [], 0
         progress_bar = st.progress(0)
@@ -94,9 +93,8 @@ class VantageMaster:
         return final_pool, total_crunch_time
 
 # --- UI LAYER ---
-st.title("📈 VANTAGE MASTER V12.2")
-f1 = st.file_uploader("1. SaberSim CSV", type="csv")
-f2 = st.file_uploader("2. DK Contest CSV", type="csv")
+st.title("📈 VANTAGE V12.3 MANUAL LOCK")
+f1 = st.file_uploader("Upload SaberSim CSV", type="csv")
 
 if f1:
     raw = pd.read_csv(f1)
@@ -104,28 +102,16 @@ if f1:
     num_games = st.sidebar.slider("Number of Games", 1, 15, 4)
     num_lineups = st.sidebar.slider("Portfolio Size", 1, 50, 15)
     
-    if st.button("🔥 EXECUTE FULL STACK AUDIT"):
-        # Correctly calling the restored method
+    if st.button("🔥 GENERATE AUDITED LINEUPS"):
         engine.generate_proprietary_projections(0.75, {'Donovan Mitchell': 1.22, 'Scottie Barnes': 1.28})
         pool, crunch = engine.build_pool(num_lineups, 0.45, [], 3, 1.45, 40000)
         
-        st.success(f"✅ AUDIT: {len(pool)*40000:,} Matrix Iterations verified in {crunch:.0f}ms.")
+        st.success(f"✅ AUDIT: {len(pool)*40000:,} iterations verified in {crunch:.0f}ms.")
         
-        if f2:
-            try:
-                content = f2.getvalue().decode('utf-8').splitlines()
-                header_row = next(i for i, line in enumerate(content) if 'Entry ID' in line)
-                f2.seek(0)
-                contest_df = pd.read_csv(f2, skiprows=header_row)
-                for i in range(min(len(pool), len(contest_df))):
-                    for s in ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']:
-                        contest_df.at[i, s] = pool[i]['players'][s]['Name']
-                st.download_button("💾 DOWNLOAD DK BULK EDIT", data=contest_df.to_csv(index=False), file_name="dk_edit.csv")
-            except: st.error("Contest CSV format error.")
-
         for i, l in enumerate(pool):
             m = l['metrics']
             grade, _ = engine.calculate_vantage_grade(m['Win'], m['Own'], m['Sal'], num_games)
             badge = "🔥 TAKEDOWN CAPABLE" if m['Win'] > 5.0 and m['Own'] < 120 else ""
             with st.expander(f"{badge} [{grade}] Lineup #{i+1} | Win: {m['Win']}% | Own: {m['Own']}% | Sal: ${m['Sal']}"):
+                # Optimized table view for manual entry
                 st.table(pd.DataFrame(l['players']).T[['Name', 'Team', 'Sal', 'Own']])
