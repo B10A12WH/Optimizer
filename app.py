@@ -4,20 +4,48 @@ import numpy as np
 import pulp
 import io
 
-st.set_page_config(page_title="VANTAGE-V6.1 PRO", layout="wide", page_icon="🎯")
+# --- VANTAGE-V7.0 PRO: AUTONOMOUS EDITION ---
+st.set_page_config(page_title="VANTAGE-V7.0 PRO", layout="wide", page_icon="🤖")
 
-class VantageProV6:
+class VantageProV7:
     def __init__(self, df):
         self.raw_df = df.copy()
         self.raw_df.columns = [c.strip() for c in self.raw_df.columns]
+        
         mapping = {
             'Name': 'Name', 'Salary': 'Sal', 'dk_points': 'Market_Proj', 
             'Adj Own': 'Own', 'Pos': 'Pos', 'Team': 'Team', 'Status': 'Status'
         }
         self.raw_df = self.raw_df.rename(columns=mapping)
+        
         for col in ['Sal', 'Market_Proj', 'Own']:
             if col in self.raw_df.columns:
                 self.raw_df[col] = pd.to_numeric(self.raw_df[col], errors='coerce').fillna(0 if col != 'Own' else 5)
+
+    def auto_calibrate_settings(self):
+        """THE BRAIN: Reads the slate and determines the optimal slider positions."""
+        num_teams = self.raw_df['Team'].nunique()
+        avg_own = self.raw_df['Own'].mean()
+        scrub_count = len(self.raw_df[self.raw_df['Status'].isin(['O', 'OUT', 'INJ'])])
+        
+        # 1. Leverage Strength (Fewer teams = higher leverage needed to beat the crowd)
+        if num_teams <= 4: # Very Small Slate (Tonight)
+            auto_lev = 1.35
+            auto_sharks = 1
+        elif num_teams <= 10: # Mid-Sized Slate
+            auto_lev = 1.10
+            auto_sharks = 1
+        else: # Large Slate (10+ games)
+            auto_lev = 0.85
+            auto_sharks = 0
+            
+        # 2. Alpha Weight (Trust custom logic more when ownership is dense)
+        auto_alpha = 0.80 if avg_own > 10 else 0.70
+        
+        # 3. Exposure Cap (More injuries = lower cap to spread the 'Value' windfall)
+        auto_exp = 0.45 if scrub_count > 6 else 0.60
+        
+        return auto_lev, auto_alpha, auto_exp, auto_sharks
 
     def get_auto_scrubs(self):
         csv_outs = self.raw_df[self.raw_df['Status'].isin(['O', 'OUT', 'INJ'])]['Name'].tolist()
@@ -35,10 +63,10 @@ class VantageProV6:
     def simulate_win_pct(self, lineup_players):
         sims = 200
         teams = list(set([p['Team'] for p in lineup_players]))
-        # Correlated Sim Logic
         team_variance = {t: np.random.normal(1.0, 0.10) for t in teams}
         scores = []
         for _ in range(sims):
+            # Correlated scoring simulation
             l_score = sum([p['Final_Proj'] * team_variance.get(p['Team'], 1.0) * np.random.normal(1.0, 0.15) for p in lineup_players])
             scores.append(l_score)
         target_score = 305 
@@ -56,15 +84,18 @@ class VantageProV6:
             team_shocks = {t: np.random.normal(1, 0.08) for t in unique_teams}
             sim_df['Team_Shock'] = sim_df['Team'].map(team_shocks)
             sim_df['Sim'] = sim_df['Final_Proj'] * sim_df['Team_Shock'] * np.random.normal(1, 0.12, len(sim_df))
+            
             sim_df['Lev_Fact'] = 1 + ((sim_df['Own'] / 100) * leverage_weight)
             sim_df['Shark_Score'] = (sim_df['Sim']**3) / sim_df['Lev_Fact']
             
-            prob = pulp.LpProblem(f"V6_{n}", pulp.LpMaximize)
+            prob = pulp.LpProblem(f"V7_{n}", pulp.LpMaximize)
             slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
             choices = pulp.LpVariable.dicts("C", (sim_df.index, slots), cat='Binary')
+            
             prob += pulp.lpSum([sim_df.loc[i, 'Shark_Score'] * choices[i][s] for i in sim_df.index for s in slots])
             prob += pulp.lpSum([sim_df.loc[i, 'Sal'] * choices[i][s] for i in sim_df.index for s in slots]) <= 50000
             prob += pulp.lpSum([sim_df.loc[i, 'Sal'] * choices[i][s] for i in sim_df.index for s in slots]) >= min_sal
+            
             sim_df['Is_Shark'] = sim_df['Own'].apply(lambda x: 1 if x < 8 else 0)
             prob += pulp.lpSum([sim_df.loc[i, 'Is_Shark'] * choices[i][s] for i in sim_df.index for s in slots]) >= min_sharks
 
@@ -110,27 +141,32 @@ uploaded_file = st.file_uploader("Upload SaberSim CSV", type="csv")
 
 if uploaded_file:
     raw_data = pd.read_csv(uploaded_file)
-    engine = VantageProV6(raw_data)
+    engine = VantageProV7(raw_data)
     
-    st.sidebar.header("🕹️ V6.1 Quant Controls")
+    # --- AUTO-CALIBRATION ---
+    a_lev, a_alp, a_exp, a_sharks = engine.auto_calibrate_settings()
+    
+    st.sidebar.header("🤖 Autonomous Config")
+    st.sidebar.info(f"Slate Context: {raw_data['Team'].nunique()} Teams | {len(engine.get_auto_scrubs())} Scratches detected.")
+    
+    # Sliders default to the Auto-Calibrated values
     num_lineups = st.sidebar.slider("Number of Lineups", 1, 50, 15)
-    min_sharks = st.sidebar.slider("Min 'Shark' Players (<8% Own)", 0, 3, 1)
-    
-    alpha_weight = st.sidebar.slider("Alpha System Weight", 0.0, 1.0, 0.75)
-    leverage_weight = st.sidebar.slider("Leverage Strength", 0.0, 2.0, 1.15)
-    exp_limit = st.sidebar.slider("Exposure Cap", 0.1, 1.0, 0.5)
+    leverage_weight = st.sidebar.slider("Leverage Strength", 0.0, 2.0, a_lev)
+    alpha_weight = st.sidebar.slider("Alpha System Weight", 0.0, 1.0, a_alp)
+    exp_limit = st.sidebar.slider("Global Exposure Cap", 0.1, 1.0, a_exp)
+    min_sharks = st.sidebar.slider("Min Shark Players (<8% Own)", 0, 3, a_sharks)
     
     mitchell_b = st.sidebar.slider("Mitchell Boost", 1.0, 1.5, 1.22)
     barnes_b = st.sidebar.slider("Barnes Boost", 1.0, 1.5, 1.28)
     
-    if st.button("🔥 GENERATE V6.1 PORTFOLIO"):
+    if st.button("🔥 GENERATE AUTONOMOUS PORTFOLIO"):
         auto_scrubs = engine.get_auto_scrubs()
-        st.info(f"🤖 Auto-Audit: {len(auto_scrubs)} players scrubbed.")
+        st.info(f"🤖 Auto-Audit: {len(auto_scrubs)} players scrubbed from pool.")
         
-        with st.status("Simulating Correlated Outcomes...", expanded=True) as status:
+        with st.status("Engine Self-Correcting & Simulating...", expanded=True) as status:
             engine.generate_proprietary_projections(alpha_weight, {'Donovan Mitchell': mitchell_b, 'Scottie Barnes': barnes_b})
             pool = engine.build_pool(num_lineups, exp_limit, auto_scrubs, leverage_weight, 49750, min_sharks)
-            status.update(label="Portfolio Complete!", state="complete", expanded=False)
+            status.update(label="V7.0 Portfolio Finalized!", state="complete", expanded=False)
         
         st.subheader("📊 Quant Portfolio Audit")
         all_players = []
@@ -143,29 +179,20 @@ if uploaded_file:
         for i, l in enumerate(pool):
             m = l['metrics']
             
-            # --- NEW: VANTAGE SIGNAL LOGIC ---
-            is_ceiling = 1.0 <= m['Win'] <= 3.0
-            is_leverage = 75 <= m['Own'] <= 95
+            # Badge Signal Logic
+            is_elite = (1.0 <= m['Win'] <= 3.0) and (75 <= m['Own'] <= 95)
+            badge = "🔥 ELITE SHARK BUILD" if is_elite else "Standard Build"
             
-            badges = []
-            if is_ceiling and is_leverage: badges.append("🔥 ELITE SHARK BUILD")
-            elif is_ceiling: badges.append("👹 CEILING MONSTER")
-            elif is_leverage: badges.append("🎯 GPP SWEET SPOT")
-            
-            badge_str = " | ".join(badges) if badges else "Standard Build"
-            header_color = "green" if "ELITE" in badge_str else "white"
-            
-            with st.expander(f"[{badge_str}] Lineup #{i+1} | Win%: {m['Win']}% | Own: {m['Own']}%"):
-                if "ELITE" in badge_str:
-                    st.success("✅ AUTHENTICITY VERIFIED: This lineup meets both Elite Shark conditions.")
-                
+            with st.expander(f"[{badge}] Lineup #{i+1} | Win%: {m['Win']}% | Own: {m['Own']}%"):
+                if is_elite: st.success("✅ AUTHENTICITY VERIFIED: Elite leverage & ceiling detected.")
                 st.write(f"**Vantage Median:** {m['Avg']} points")
                 display_df = pd.DataFrame(l['players']).T[['Name', 'Team', 'Sal', 'Own']]
                 display_df.columns = ['Player', 'Team', 'Salary', 'Ownership %']
                 st.table(display_df)
             
+        # Export
         export_rows = [[l['players'][s]['Name'] for s in ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']] for l in pool]
         export_df = pd.DataFrame(export_rows, columns=['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL'])
         csv_buffer = io.StringIO()
         export_df.to_csv(csv_buffer, index=False)
-        st.download_button("💾 Download V6.1 Portfolio", data=csv_buffer.getvalue(), file_name="vantage_v6_1.csv", mime="text/csv")
+        st.download_button("💾 Download Autonomous CSV", data=csv_buffer.getvalue(), file_name="vantage_v7.csv", mime="text/csv")
