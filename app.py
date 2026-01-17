@@ -6,10 +6,10 @@ import re
 from datetime import datetime
 import time
 
-# --- VANTAGE 99: INDUSTRIAL NBA SIMULATOR (V28.0) ---
+# --- VANTAGE 99: INDUSTRIAL NBA SIMULATOR (V29.0) ---
 st.set_page_config(page_title="VANTAGE NBA LAB", layout="wide", page_icon="🏀")
 
-# --- UI STYLING (Sabersim Parity) ---
+# --- UI STYLING ---
 st.markdown("""
     <style>
     .main { background-color: #0b0e11; color: #e6e6e6; }
@@ -41,18 +41,17 @@ class VantageSimulator:
         s_df['Time'] = s_df['Game Info'].apply(get_time)
         s_df['Proj'] = pd.to_numeric(s_df['AvgPointsPerGame'], errors='coerce').fillna(10.0).clip(lower=5.0)
         
-        # INJURY SCRUB (JAN 17)
+        # INDUSTRIAL INJURY PURGE
         scrubbed = ['Nikola Jokic', 'Pascal Siakam', 'Trae Young', 'Jalen Green', 'Andrew Nembhard', 
                    'Jonas Valanciunas', 'Isaiah Hartenstein', 'Jaime Jaquez Jr.', 'Devin Vassell', 
                    'Moussa Diabate', 'Christian Braun', 'T.J. McConnell', 'Zaccharie Risacher', 
                    'Davion Mitchell', 'Jamaree Bouyea', 'Jayson Tatum', 'Cameron Johnson']
         self.df = s_df[~s_df['Name'].isin(scrubbed)].reset_index(drop=True)
 
-    def run_alpha_sims(self, n_sims=5000, jitter=0.20, min_unique=3):
+    def run_alpha_sims(self, n_sims=1000, jitter=0.20, min_unique=3):
         n_p = len(self.df)
         proj_vals, sal_vals = self.df['Proj'].values.astype(float), self.df['Salary'].values.astype(float)
         
-        # Solver Constraints
         A, bl, bu = [], [], []
         A.append(np.ones(n_p)); bl.append(8); bu.append(8)
         A.append(sal_vals); bl.append(49200.0); bu.append(50000.0)
@@ -60,25 +59,33 @@ class VantageSimulator:
         A.append(self.df['is_G'].values.astype(float)); bl.append(3.0); bu.append(8.0)
         A.append(self.df['is_F'].values.astype(float)); bl.append(3.0); bu.append(8.0)
 
-        pool = []
+        raw_pool = []
         progress = st.progress(0)
+        status = st.empty()
+        
         for i in range(n_sims):
-            if i % 100 == 0: progress.progress(i / n_sims)
+            if i % (n_sims//10) == 0: 
+                progress.progress(i / n_sims)
+                status.text(f"Industrial Simulation in progress... {i}/{n_sims}")
+            
             sim = np.random.normal(proj_vals, proj_vals * jitter).clip(min=0)
             res = milp(c=-sim, constraints=LinearConstraint(A, bl, bu), integrality=np.ones(n_p), bounds=Bounds(0, 1))
             if res.success:
                 idx = np.where(res.x > 0.5)[0]
-                pool.append({'idx': tuple(sorted(idx)), 'score': sim[idx].sum()})
+                raw_pool.append({'idx': set(idx), 'score': sim[idx].sum()})
         
-        # Diversity Selection
-        pool = sorted(pool, key=lambda x: x['score'], reverse=True)
-        final = []
-        for item in pool:
-            if len(final) >= 20: break
-            if not any(len(set(item['idx']) & set(f['idx'])) > (8 - min_unique) for f in final):
+        # DIVERSITY SORT (Fixed KeyError Logic)
+        raw_pool = sorted(raw_pool, key=lambda x: x['score'], reverse=True)
+        final_lineups = []
+        
+        for item in raw_pool:
+            if len(final_lineups) >= 20: break
+            # Logic: Ensure new lineup doesn't overlap too much with already selected ones
+            if not any(len(item['idx'] & f['idx']) > (8 - min_unique) for f in final_lineups):
                 l_df = self.df.iloc[list(item['idx'])]
                 latest = l_df['Time'].max()
-                # Slot Assignment Solver
+                
+                # Assembly logic for PG,SG,SF,PF,C,G,F,UTIL
                 rost = {}
                 p_pool = l_df.copy()
                 for slot, cond in [('PG','is_PG'),('SG','is_SG'),('SF','is_SF'),('PF','is_PF'),('C','is_C'),('G','is_G'),('F','is_F')]:
@@ -87,29 +94,32 @@ class VantageSimulator:
                     rost[slot] = f"{match.iloc[0]['Name']} ({match.iloc[0]['ID']})"
                     p_pool = p_pool.drop(match.index)
                 rost['UTIL'] = f"{p_pool.iloc[0]['Name']} ({p_pool.iloc[0]['ID']})"
-                final.append({**rost, 'Score': round(item['score'], 2), 'Salary': int(l_df['Salary'].sum()), 'Players': l_df['Name'].tolist()})
+                
+                final_lineups.append({**rost, 'Score': round(item['score'], 2), 'Salary': int(l_df['Salary'].sum()), 'Players': l_df['Name'].tolist(), 'idx': item['idx']})
         
         progress.empty()
-        return final
+        status.empty()
+        return final_lineups
 
 # --- UI ---
 st.title("🏀 VANTAGE 99 INDUSTRIAL SIMULATOR")
 st.sidebar.header("⚙️ SIM SETTINGS")
 n_sims = st.sidebar.select_slider("Simulations", options=[100, 500, 1000, 5000], value=1000)
 
-f = st.file_uploader("Upload Salary CSV", type="csv")
+f = st.file_uploader("Upload DraftKings Salary CSV", type="csv")
 if f:
     engine = VantageSimulator(pd.read_csv(f))
-    if st.button("🚀 EXECUTE 5,000 SIMULATIONS"):
+    if st.button(f"🚀 EXECUTE {n_sims} SIMULATIONS"):
         results = engine.run_alpha_sims(n_sims=n_sims)
-        st.success(f"🏆 TOP ALPHA LINEUP FOUND (Winner of {n_sims} Simulations)")
-        st.table(pd.DataFrame([results[0]])[['PG','SG','SF','PF','C','G','F','UTIL']])
-        
-        t1, t2 = st.tabs(["📊 Exposure Report", "🛡️ Legitimacy Audit"])
-        with t1:
-            all_p = [p for r in results for p in r['Players']]
-            exp = pd.Series(all_p).value_counts().reset_index()
-            exp.columns = ['Player', 'Count']
-            st.bar_chart(exp.set_index('Player')['Count'])
-        with t2:
-            st.info("Mathematical Proof: Lineup #1 uses $50,000 cap and verified PG-UTIL eligibility.")
+        if results:
+            st.success(f"🏆 TOP ALPHA LINEUP IDENTIFIED")
+            st.table(pd.DataFrame([results[0]])[['PG','SG','SF','PF','C','G','F','UTIL']])
+            
+            t1, t2 = st.tabs(["📊 Exposure Report", "📥 Download Batch"])
+            with t1:
+                all_p = [p for r in results for p in r['Players']]
+                exp = pd.Series(all_p).value_counts().reset_index()
+                exp.columns = ['Player', 'Count']
+                st.bar_chart(exp.set_index('Player')['Count'])
+            with t2:
+                st.download_button("Download CSV", pd.DataFrame(results).drop(columns=['Score','Salary','Players','idx']).to_csv(index=False), "NBA_Alpha_Batch.csv")
