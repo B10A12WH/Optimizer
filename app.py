@@ -1,18 +1,14 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pulp
+from scipy.optimize import milp, LinearConstraint, Bounds
+import re
 
-st.set_page_config(page_title="VANTAGE 99", layout="wide")
+# --- VANTAGE 99: TOURNAMENT GRADE REBUILD ---
+st.set_page_config(page_title="VANTAGE 99", layout="wide", page_icon="🧪")
 
-def universal_parser(df):
-    """Deep scans the dataframe to find and promote the correct header row."""
-    # Check if headers are already correct
-    cols = [str(c).lower() for c in df.columns]
-    if any('name' in c for c in cols) and any('salary' in c for c in cols):
-        return df
-    
-    # Scan the first 15 rows for 'Name' and 'Salary'
+def deep_scan_headers(df):
+    """Finds the actual header row even if there is trash at the top."""
     for i, row in df.head(15).iterrows():
         row_vals = [str(v).lower() for v in row.values]
         if any('name' in v for v in row_vals) and any('salary' in v for v in row_vals):
@@ -21,49 +17,93 @@ def universal_parser(df):
             return new_df.reset_index(drop=True)
     return df
 
-class Vantage99:
-    def __init__(self, p_df, i_df, s_df):
-        # 1. CLEAN THE METADATA
-        p_df = universal_parser(p_df)
-        i_df = universal_parser(i_df)
-        s_df = universal_parser(s_df)
+def normalize(name, is_dst=False):
+    """Molecular normalization for perfect file merging."""
+    name = str(name).lower().strip()
+    name = re.sub(r'[^a-z0-9 ]', '', name)
+    if is_dst:
+        if '49ers' in name or 'ers' in name: return '49ers'
+        return name.split()[-1]
+    for s in [' jr', ' sr', ' iii', ' ii', ' iv']:
+        if name.endswith(s): name = name[:-len(s)]
+    return name.strip()
 
-        # Standardize headers
+class VantageAlpha:
+    def __init__(self, p_df, s_df):
+        # 1. PARSE & CLEAN
+        p_df, s_df = deep_scan_headers(p_df), deep_scan_headers(s_df)
         p_df.columns = [str(c).strip() for c in p_df.columns]
-        i_df.columns = [str(c).strip() for c in i_df.columns]
         s_df.columns = [str(c).strip() for c in s_df.columns]
-
-        # 2. FIND DYNAMIC KEYS
-        # Logic to find the Name and Salary columns in the DK file
+        
+        # 2. THE MERGE REACTION
+        p_df['norm'] = p_df.apply(lambda x: normalize(x['Name'], x['Position'] == 'DST'), axis=1)
+        s_df['norm'] = s_df.apply(lambda x: normalize(x['Name'], x['Position'] == 'DST'), axis=1)
+        
         s_name_key = next((c for c in s_df.columns if 'name' in c.lower()), 'Name')
         s_sal_key = next((c for c in s_df.columns if 'salary' in c.lower()), 'Salary')
+        s_id_key = next((c for c in s_df.columns if 'id' in c.lower() and 'name' not in c.lower()), 'ID')
 
-        # 3. MOLECULAR MERGE
-        self.df = pd.merge(p_df, i_df[['Name', 'MaxExp']], on='Name', how='left')
-        self.df = pd.merge(self.df, s_df[[s_name_key, s_sal_key]], left_on='Name', right_on=s_name_key, how='left')
+        self.df = pd.merge(p_df, s_df[['norm', s_sal_key, s_id_key]], on='norm', how='inner')
+        self.df = self.df.rename(columns={'Position': 'Pos', 'ProjPts': 'Proj', 'ProjOwn': 'Own', s_sal_key: 'Sal', s_id_key: 'ID'})
         
-        # 4. PURIFICATION
-        self.df = self.df.rename(columns={'Position': 'Pos', 'ProjPts': 'Proj', 'ProjOwn': 'Own', s_sal_key: 'Sal'})
-        self.df['Proj'] = pd.to_numeric(self.df['Proj'], errors='coerce').fillna(0)
-        self.df['Sal'] = pd.to_numeric(self.df['Sal'], errors='coerce').fillna(5000)
-        self.df['Own'] = pd.to_numeric(self.df['Own'], errors='coerce').fillna(10)
-
-        # Blacklist OUT players
-        blacklist = ['DK Metcalf', 'Gabe Davis', 'George Kittle', 'Fred Warner']
-        self.df = self.df[~self.df['Name'].isin(blacklist)]
-        self.df = self.df[self.df['Pos'] != 'K']
-
-    def cook(self, n_lineups=20):
-        pool = []
-        player_indices = self.df.index
-        # GPP 2-Game Constraints
-        OWN_CAP, SAL_FLOOR, JITTER, MIN_UNIQUE = 135.0, 48200, 0.35, 3
-
-        for n in range(n_lineups):
-            sim_df = self.df.copy()
-            sim_df['sim_proj'] = np.random.normal(sim_df['Proj'], sim_df['Proj'] * JITTER)
+        # 3. SCENARIO CATALYSTS (Multipliers)
+        # Apply the specific 2026 Weekend Multipliers
+        boosts = {'jaxon smithnjigba': 1.35, 'jauan jennings': 1.40, 'kenneth walker': 1.30, 'khalil shakir': 1.25, 'rj harvey': 1.15, 'josh allen': 0.88}
+        for n, m in boosts.items():
+            self.df.loc[self.df['norm'] == n, 'Proj'] *= m
             
-            # Robust Scenario Multipliers (Substring matching to avoid case/suffix issues)
-            boosts = {
-                'Jaxon Smith-Njigba': 1.35, 'Jauan Jennings': 1.40, 
-                'Kenneth Walker': 1.30, 'Khalil Shakir':
+        # 4. BLACKLIST
+        self.df = self.df[~self.df['norm'].isin(['dk metcalf', 'gabe davis', 'george kittle', 'fred warner'])]
+        self.df = self.df[self.df['Pos'] != 'K'] # Force exclude kickers
+
+    def run_batch(self, n=20):
+        pool = []
+        n_players = len(self.df)
+        OWN_CAP, SAL_FLOOR, JITTER, MIN_UNIQUE = 155.0, 48200, 0.35, 3
+
+        for _ in range(n):
+            sim_proj = np.random.normal(self.df['Proj'], self.df['Proj'] * JITTER)
+            A, b_l, b_u = [], [], []
+            A.append(np.ones(n_players)); b_l.append(9); b_u.append(9) # Total 9
+            A.append(self.df['Sal'].values); b_l.append(SAL_FLOOR); b_u.append(50000) # Salary
+            A.append(self.df['Own'].values); b_l.append(0); b_u.append(OWN_CAP) # Own
+            
+            for p, (mn, mx) in [('QB',(1,1)),('RB',(2,3)),('WR',(3,4)),('TE',(1,2)),('DST',(1,1))]:
+                mask = (self.df['Pos'] == p).astype(int).values
+                A.append(mask); b_l.append(mn); b_u.append(mx)
+            
+            for prev in pool:
+                m = np.zeros(n_players); m[prev] = 1
+                A.append(m); b_l.append(0); b_u.append(9 - MIN_UNIQUE)
+            
+            res = milp(c=-sim_proj, constraints=LinearConstraint(A, b_l, b_u), integrality=np.ones(n_players), bounds=Bounds(0, 1))
+            if res.success: pool.append(np.where(res.x > 0.5)[0])
+        return [self.df.iloc[p] for p in pool]
+
+# --- STREAMLIT FRONT END ---
+st.title("🧪 VANTAGE 99")
+col1, col2 = st.columns(2)
+f_proj = col1.file_uploader("1. Projections CSV", type="csv")
+f_sal = col2.file_uploader("2. DraftKings Salary CSV", type="csv")
+
+if f_proj and f_sal:
+    engine = VantageAlpha(pd.read_csv(f_proj), pd.read_csv(f_sal))
+    if st.button("🚀 ASSEMBLE 20 LINEUPS"):
+        lineups = engine.run_batch(20)
+        final_rows = []
+        for l in lineups:
+            q = l[l['Pos']=='QB'].iloc[0]
+            r = l[l['Pos']=='RB'].sort_values('Sal', ascending=False)
+            w = l[l['Pos']=='WR'].sort_values('Sal', ascending=False)
+            t = l[l['Pos']=='TE'].sort_values('Sal', ascending=False)
+            d = l[l['Pos']=='DST'].iloc[0]
+            
+            def fmt(p): return f"{p['Name']} ({int(p['ID'])})"
+            
+            # EXACT ASSEMBLY: QB,RB,RB,WR,WR,WR,TE,FLEX,DST
+            flex = r.iloc[2] if len(r)>2 else (w.iloc[3] if len(w)>3 else t.iloc[1])
+            final_rows.append([fmt(q), fmt(r.iloc[0]), fmt(r.iloc[1]), fmt(w.iloc[0]), fmt(w.iloc[1]), fmt(w.iloc[2]), fmt(t.iloc[0]), fmt(flex), fmt(d)])
+        
+        out_df = pd.DataFrame(final_rows, columns=['QB','RB','RB','WR','WR','WR','TE','FLEX','DST'])
+        st.table(out_df)
+        st.download_button("📥 Download Footballers-Style CSV", out_df.to_csv(index=False), "Vantage99_Batch.csv")
