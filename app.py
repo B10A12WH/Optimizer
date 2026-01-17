@@ -8,13 +8,13 @@ from datetime import datetime
 # --- VANTAGE 99: INDUSTRIAL NBA COMMAND CENTER ---
 st.set_page_config(page_title="VANTAGE 99 NBA", layout="wide", page_icon="🏀")
 
-# --- CSS STYLING FOR GPP VISUALS ---
+# --- FIXED CSS FOR PRODUCTION ---
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
-    .stMetric { background-color: #161b22; border: 1px solid #30363d; padding: 15px; border-radius: 10px; }
+    div[data-testid="stMetricValue"] { font-size: 24px; color: #00ffcc; }
     </style>
-    """, unsafe_all_of_the_headers=True)
+    """, unsafe_allow_html=True) # Fixed the typo here
 
 def deep_scan(df):
     for i, row in df.head(15).iterrows():
@@ -42,7 +42,7 @@ class VantageNBA:
         self.df = s_df.reset_index(drop=True)
         self.jitter = jitter
 
-    def cook_and_audit(self, n=20):
+    def cook_and_audit(self, n=50):
         pool = []
         n_p = len(self.df)
         sal_vals = self.df['Salary'].values.astype(float)
@@ -64,7 +64,7 @@ class VantageNBA:
                 l_df = self.df.iloc[idx].copy().reset_index(drop=True)
                 latest_time = l_df['Time'].max()
                 
-                # SLOTTING ENGINE
+                # ASSIGNMENT ENGINE
                 M = np.zeros((8, 8))
                 cost = np.zeros((8, 8))
                 for i, p in l_df.iterrows():
@@ -93,58 +93,46 @@ class VantageNBA:
                         'Sal': int(l_df['Salary'].sum()), 'players': l_df['Name'].tolist()
                     })
         
+        if not pool: return []
         scores = [p['score'] for p in pool]
         for p in pool:
             perc = sum(p['score'] >= s for s in scores) / len(scores)
-            p['Grade'] = "A+" if perc >= 0.95 else "A" if perc >= 0.85 else "B" if perc >= 0.70 else "C"
+            if perc >= 0.95: p['Grade'] = "A+"
+            elif perc >= 0.85: p['Grade'] = "A"
+            elif perc >= 0.70: p['Grade'] = "B"
+            else: p['Grade'] = "C"
         return pool
 
-# --- SIDEBAR CONFIG ---
-st.sidebar.title("🛠 Lab Configuration")
-n_lineups = st.sidebar.slider("Batch Size", 10, 100, 20)
-jitter_val = st.sidebar.slider("Monte Carlo Jitter (%)", 5, 30, 15) / 100.0
-st.sidebar.info("High jitter increases GPP ceiling but lowers floor.")
-
-# --- MAIN UI ---
+# --- UI ---
 st.title("🏀 VANTAGE 99: INDUSTRIAL COMMAND CENTER")
 f = st.file_uploader("Upload DraftKings NBA Salary CSV", type="csv")
 
 if f:
-    engine = VantageNBA(pd.read_csv(f), jitter=jitter_val)
+    engine = VantageNBA(pd.read_csv(f))
     if st.button("🚀 INITIATE INDUSTRIAL BATCH"):
-        with st.spinner("Processing Molecular Simulation..."):
-            results = engine.cook_and_audit(n_lineups)
-            
-            # --- METRICS BAR ---
-            avg_sal = np.mean([r['Sal'] for r in results])
-            a_plus_count = sum(1 for r in results if r['Grade'] == "A+")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Batch Size", f"{len(results)} Lineups")
-            m2.metric("Avg Salary", f"${int(avg_sal)}")
-            m3.metric("Grade A+ Builds", a_plus_count)
+        results = engine.cook_and_audit(50)
+        
+        if results:
+            # Sort by Score for Grade A+ identification
+            sorted_res = sorted(results, key=lambda x: x['score'], reverse=True)
+            top_lineup = sorted_res[0]
 
-            # --- TABS SYSTEM ---
-            t1, t2, t3 = st.tabs(["🏆 Top Lineups", "📊 Exposure Report", "🔍 Audit Log"])
+            # --- TOP ALPHA DASHBOARD ---
+            st.success(f"🏆 TOP ALPHA BUILD IDENTIFIED (Grade {top_lineup['Grade']})")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Simulated Score", round(top_lineup['score'], 2))
+            c2.metric("Salary Used", f"${top_lineup['Sal']}")
+            c3.metric("UTIL Audit", top_lineup['LateSwap'])
             
+            st.json(top_lineup['roster'])
+
+            # --- TABS FOR BATCH DATA ---
+            t1, t2 = st.tabs(["📊 Exposure Report", "🔍 Full Batch Audit"])
             with t1:
-                df_out = pd.DataFrame([r['roster'] for r in results])
-                df_out['Grade'] = [r['Grade'] for r in results]
-                st.dataframe(df_out.sort_values('Grade'), use_container_width=True)
-                st.download_button("📥 Download Upload File", df_out.drop(columns=['Grade']).to_csv(index=False), "Vantage_NBA_Output.csv")
-
+                all_p = [p for r in results for p in r['players']]
+                exp = pd.Series(all_p).value_counts().reset_index()
+                exp.columns = ['Player', 'Count']
+                st.dataframe(exp)
             with t2:
-                all_players = [p for r in results for p in r['players']]
-                exp_df = pd.Series(all_players).value_counts().reset_index()
-                exp_df.columns = ['Player', 'Count']
-                exp_df['Exposure %'] = (exp_df['Count'] / len(results)) * 100
-                st.bar_chart(exp_df.set_index('Player')['Exposure %'])
-                st.dataframe(exp_df, use_container_width=True)
-
-            with t3:
-                audit_df = pd.DataFrame({
-                    'Lineup #': range(1, len(results)+1),
-                    'Salary': [r['Sal'] for r in results],
-                    'Grade': [r['Grade'] for r in results],
-                    'UTIL Lock': [r['LateSwap'] for r in results]
-                })
-                st.dataframe(audit_df, use_container_width=True)
+                audit_df = pd.DataFrame([{'Grade': r['Grade'], 'Salary': r['Sal'], 'LateSwap': r['LateSwap']} for r in results])
+                st.dataframe(audit_df)
