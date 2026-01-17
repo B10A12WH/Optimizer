@@ -5,20 +5,17 @@ from scipy.optimize import milp, LinearConstraint, Bounds
 import re
 from datetime import datetime
 
-# --- VANTAGE 99: NBA INDUSTRIAL COMMAND CENTER (V25.0) ---
+# --- VANTAGE 99: INDUSTRIAL NBA COMMAND CENTER (V26.0) ---
 st.set_page_config(page_title="VANTAGE NBA LAB", layout="wide", page_icon="🏀")
 
-# --- INDUSTRIAL UI STYLING (Sabersim/Stokastic Parity) ---
+# --- 1:1 UI PARITY CSS ---
 st.markdown("""
     <style>
-    .main { background-color: #0b0e11; }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] { 
-        background-color: #161b22; border-radius: 4px 4px 0px 0px; 
-        color: white; border: 1px solid #30363d; padding: 10px 20px;
-    }
-    .stTabs [aria-selected="true"] { background-color: #00ffcc !important; color: black !important; }
-    div[data-testid="stMetric"] { background-color: #161b22; border: 1px solid #30363d; padding: 15px; border-radius: 8px; }
+    .main { background-color: #0b0e11; color: #e6e6e6; }
+    div[data-testid="stMetric"] { background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; }
+    .stTabs [data-baseweb="tab-list"] { background-color: #0b0e11; }
+    .stTabs [data-baseweb="tab"] { color: #8b949e; }
+    .stTabs [aria-selected="true"] { color: #00ffcc !important; border-bottom-color: #00ffcc !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -45,18 +42,13 @@ class VantageNBA:
         s_df['Time'] = s_df['Game Info'].apply(get_time)
         s_df['Proj'] = pd.to_numeric(s_df['AvgPointsPerGame'], errors='coerce').fillna(10.0).clip(lower=5.0)
         
-        # INDUSTRIAL INJURY SCRUB (JAN 17)
-        scrubbed_out = [
-            'Nikola Jokic', 'Pascal Siakam', 'Trae Young', 'Jalen Green', 
-            'Andrew Nembhard', 'Jonas Valanciunas', 'Isaiah Hartenstein', 
-            'Jaime Jaquez Jr.', 'Devin Vassell', 'Moussa Diabate', 
-            'Christian Braun', 'T.J. McConnell', 'Zaccharie Risacher', 
-            'Davion Mitchell', 'Jamaree Bouyea', 'Jayson Tatum'
-        ]
+        # --- INDUSTRIAL INJURY PURGE ---
+        scrubbed_out = ['Nikola Jokic', 'Pascal Siakam', 'Trae Young', 'Jalen Green', 'Andrew Nembhard', 
+                       'Jonas Valanciunas', 'Isaiah Hartenstein', 'Jaime Jaquez Jr.', 'Devin Vassell', 
+                       'Moussa Diabate', 'Christian Braun', 'T.J. McConnell', 'Zaccharie Risacher', 
+                       'Davion Mitchell', 'Jamaree Bouyea', 'Jayson Tatum']
         ruled_out = scrubbed_out + blacklisted_names
-        s_df['Conf'] = 100
-        s_df.loc[s_df['Name'].isin(ruled_out), 'Conf'] = 0
-        self.df = s_df[s_df['Conf'] > 0].reset_index(drop=True)
+        self.df = s_df[~s_df['Name'].isin(ruled_out)].reset_index(drop=True)
         self.jitter = jitter
 
     def cook(self, n=50, min_unique=3):
@@ -72,8 +64,6 @@ class VantageNBA:
             for c in ['is_PG','is_SG','is_SF','is_PF','is_C']: A.append(self.df[c].values.astype(float)); bl.append(1.0); bu.append(8.0)
             A.append(self.df['is_G'].values.astype(float)); bl.append(3.0); bu.append(8.0)
             A.append(self.df['is_F'].values.astype(float)); bl.append(3.0); bu.append(8.0)
-            
-            # Uniqueness Constraint (SaberSim Parity)
             for prev in [p['idx'] for p in pool]:
                 m = np.zeros(n_p); m[prev] = 1; A.append(m); bl.append(0); bu.append(float(8 - min_unique))
 
@@ -81,56 +71,61 @@ class VantageNBA:
             if res.success:
                 idx = np.where(res.x > 0.5)[0]
                 l_df = self.df.iloc[idx].copy().reset_index(drop=True)
-                latest_time = l_df['Time'].max()
                 
-                # SLOTTING ENGINE
+                # --- DOUBLE-PASS ASSIGNMENT ENGINE (Fixes KeyError) ---
+                latest_time = l_df['Time'].max()
                 M, cost = np.zeros((8, 8)), np.zeros((8, 8))
                 for i, p in l_df.iterrows():
                     for j, c in enumerate(['is_PG','is_SG','is_SF','is_PF','is_C','is_G','is_F']): 
                         if p[c]: M[i, j] = 1
                     M[i, 7] = 1 
-                    if p['Time'] == latest_time: cost[i, 7] = -5000
+                    if p['Time'] == latest_time: cost[i, 7] = -10000
                 
-                res_as = milp(c=cost.flatten(), constraints=LinearConstraint(
-                    [np.zeros((8,8)).flatten()], [0], [0]), integrality=np.ones(64), bounds=Bounds(0, M.flatten()))
-                # (Assembly logic optimized for 1:1 Display)
-                map_res = res_as.x.reshape((8, 8)) if res_as.success else np.eye(8)
-                slots = ['PG','SG','SF','PF','C','G','F','UTIL']
-                rost = {slots[j]: f"{l_df.iloc[i]['Name']} ({l_df.iloc[i]['ID']})" for i in range(8) for j in range(8) if map_res[i,j]>0.5}
-                pool.append({'roster': rost, 'score': sim[idx].sum(), 'idx': idx, 'players': l_df['Name'].tolist()})
-        
+                A_as, bl_as, bu_as = [], [], []
+                for i in range(8): r=np.zeros((8,8)); r[i,:]=1; A_as.append(r.flatten()); bl_as.append(1); bu_as.append(1)
+                for j in range(8): c=np.zeros((8,8)); c[:,j]=1; A_as.append(c.flatten()); bl_as.append(1); bu_as.append(1)
+                
+                res_as = milp(c=cost.flatten(), constraints=LinearConstraint(A_as, bl_as, bu_as), integrality=np.ones(64), bounds=Bounds(0, M.flatten()))
+                if res_as.success:
+                    map_res = res_as.x.reshape((8, 8))
+                    slots = ['PG','SG','SF','PF','C','G','F','UTIL']
+                    rost = {slots[j]: f"{l_df.iloc[i]['Name']} ({l_df.iloc[i]['ID']})" for i in range(8) for j in range(8) if map_res[i,j]>0.5}
+                    pool.append({'roster': rost, 'score': sim[idx].sum(), 'idx': idx, 'players': l_df['Name'].tolist()})
         return sorted(pool, key=lambda x: x['score'], reverse=True)
 
-# --- LEFT PANE: FILTERS ---
-st.sidebar.title("🛠️ INDUSTRIAL CONTROLS")
-n_lineups = st.sidebar.slider("Batch Size", 10, 500, 100)
-min_uniques = st.sidebar.slider("Min Uniques", 1, 5, 3)
-jitter = st.sidebar.slider("Correlation Jitter (%)", 5, 30, 15) / 100.0
+# --- SIDEBAR (SaberSim Parity) ---
+st.sidebar.title("🧪 INDUSTRIAL FILTERS")
+n_batch = st.sidebar.slider("Batch Size", 10, 500, 100)
+jitter = st.sidebar.slider("Sim Variance (%)", 5, 40, 15) / 100.0
 
-# --- CENTER PANE: COMMAND DECK ---
-st.title("🏀 VANTAGE NBA INDUSTRIAL")
+# --- MAIN TERMINAL ---
+st.title("🏀 VANTAGE NBA COMMAND DECK")
 f = st.file_uploader("Upload Salary CSV", type="csv")
 
 if f:
     engine = VantageNBA(pd.read_csv(f), jitter=jitter)
-    if st.button("🚀 EXECUTE ALPHA BATCH"):
-        results = engine.cook(n_lineups, min_uniques)
-        
-        # --- ALPHA HEADER ---
-        top = results[0]
-        st.success(f"🏆 TOP ALPHA LINEUP IDENTIFIED")
-        st.table(pd.DataFrame([top['roster']])[['PG','SG','SF','PF','C','G','F','UTIL']])
-        
-        # --- INDUSTRIAL TABS ---
-        t1, t2, t3 = st.tabs(["📊 Exposure Report", "🛡️ Injury Audit", "📥 Batch Download"])
-        with t1:
-            all_p = [p for r in results for p in r['players']]
-            exp = pd.Series(all_p).value_counts().reset_index()
-            exp.columns = ['Player', 'Count']
-            exp['Exposure %'] = (exp['Count'] / len(results)) * 100
-            st.bar_chart(exp.set_index('Player')['Exposure %'])
-        with t2:
-            st.warning("Nodes Rule Out: Siakam, Young, Green, Hartenstein, Jokic, Tatum, etc.")
-            st.info("Verified Latest Start in UTIL for Late-Swap Flexibility.")
-        with t3:
-            st.download_button("Download DK Upload File", pd.DataFrame([r['roster'] for r in results]).to_csv(index=False), "NBA_Output.csv")
+    
+    tab1, tab2, tab3 = st.tabs(["📊 PLAYER POOL", "🏆 LINEUPS", "🔍 AUDIT"])
+    
+    with tab1:
+        st.subheader("Industrial Projections Editor")
+        edited_df = st.data_editor(engine.df[['Name', 'Position', 'Salary', 'Proj']], num_rows="dynamic", use_container_width=True)
+        engine.df['Proj'] = edited_df['Proj'] # Sync back
+
+    with tab2:
+        if st.button("🚀 EXECUTE BATCH"):
+            results = engine.cook(n_batch)
+            if results:
+                top = results[0]
+                st.success("TOP ALPHA BUILD IDENTIFIED")
+                # FAULT TOLERANT TABLE: Uses only keys present in the roster
+                st.table(pd.DataFrame([top['roster']])) 
+                
+                st.subheader("Batch Exposure Report")
+                all_p = [p for r in results for p in r['players']]
+                exp = pd.Series(all_p).value_counts().reset_index()
+                exp.columns = ['Player', 'Count']
+                exp['Exposure %'] = (exp['Count'] / len(results)) * 100
+                st.bar_chart(exp.set_index('Player')['Exposure %'])
+                
+                st.download_button("Download CSV", pd.DataFrame([r['roster'] for r in results]).to_csv(index=False), "NBA_Batch.csv")
