@@ -2,88 +2,171 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
-import plotly.express as px
+import plotly.graph_objects as go
+import time
 
-# --- COMMAND CENTER CONFIG ---
-st.set_page_config(page_title="VANTAGE 99 | COMMAND", layout="wide", page_icon="🧪")
+# --- STYLING: HIGH-END SAAS AESTHETIC ---
+st.set_page_config(page_title="VANTAGE 99 | ELITE", layout="wide", page_icon="🧪")
 
-# High-Density UI Styles
 st.markdown("""
     <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&display=swap');
     .main { background-color: #0b0e14; color: #e0e0e0; font-family: 'Inter', sans-serif; }
-    .stButton>button { width: 100%; border-radius: 4px; border: 1px solid #30363d; background: #161b22; color: #c9d1d9; text-align: left; padding: 10px; }
-    .stButton>button:hover { border-color: #00ffcc; background: #1c2128; }
-    .metric-card { background: #161b22; border-radius: 8px; padding: 20px; border: 1px solid #30363d; margin-bottom: 10px; }
-    .score-badge { color: #00ffcc; font-weight: bold; font-family: 'JetBrains Mono'; }
-    .pos-tag { color: #00ffcc; font-weight: bold; margin-right: 8px; font-size: 0.8rem; }
+    
+    /* Master-Detail Split */
+    .stHorizontalBlock { gap: 2rem; }
+    
+    /* Neon Glassmorphism Cards */
+    .lineup-button {
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 12px;
+        margin-bottom: 8px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+    }
+    .lineup-button:hover { border-color: #00ffcc; background: #1c2128; box-shadow: 0 0 10px rgba(0, 255, 204, 0.2); }
+    
+    /* Position Badges */
+    .pos-tag { 
+        font-family: 'JetBrains Mono', monospace;
+        font-weight: 700;
+        font-size: 0.7rem;
+        padding: 2px 6px;
+        border-radius: 4px;
+        margin-right: 10px;
+        color: #0b0e14;
+        background: #00ffcc;
+    }
+    
+    /* Section Headers */
+    .section-header {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.8rem;
+        color: #8b949e;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        margin-bottom: 15px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-# --- CORE OPTIMIZER ENGINE ---
-class InteractiveOptimizer:
+class EliteOptimizer:
     def __init__(self, df):
         cols = {c.lower().replace(" ", ""): c for c in df.columns}
         self.df = df.copy()
-        p_key = next((cols[k] for k in cols if k in ['proj', 'points', 'avgpointspergame']), df.columns[0])
-        own_key = next((cols[k] for k in cols if k in ['own', 'projown', 'ownership']), None)
         
+        # Header Agnostic Parsing
+        p_key = next((cols[k] for k in cols if k in ['proj', 'points', 'avgpointspergame']), df.columns[0])
         self.df['Proj'] = pd.to_numeric(df[p_key], errors='coerce').fillna(0.0)
         self.df['Sal'] = pd.to_numeric(df[cols.get('salary', 'Salary')]).fillna(50000)
-        self.df['Own'] = pd.to_numeric(df[own_key], errors='coerce').fillna(10.0) if own_key else 10.0
         self.df['Pos'] = df[cols.get('position', 'Position')].astype(str)
         self.df['Team'] = df[cols.get('teamabbrev', 'TeamAbbrev')].astype(str)
         self.df['ID'] = df[cols.get('id', 'ID')].astype(str)
         
-        for p in ['QB','RB','WR','TE','DST']: self.df[f'is_{p}'] = (self.df['Pos'] == p).astype(int)
+        # Binary Position Matrix
+        for p in ['QB','RB','WR','TE','DST']: 
+            self.df[f'is_{p}'] = (self.df['Pos'] == p).astype(int)
+        
+        # Divisional Blacklist (Jan 18, 2026)
         self.df = self.df[~self.df['Name'].isin(['Nico Collins', 'Justin Watson'])].reset_index(drop=True)
 
-    def assemble(self, n=20, exp=0.5):
-        # ... [Optimized solver logic from v57] ...
-        # (Returns list of dataframes)
-        return [self.df.sample(9) for _ in range(n)] # Placeholder for assemble logic
+    def assemble(self, n=20, exp=0.5, jitter=0.22):
+        n_p = len(self.df)
+        raw_p = self.df['Proj'].values.astype(np.float64)
+        sals = self.df['Sal'].values.astype(np.float64)
+        scale = np.clip(raw_p * jitter, 0.01, None)
+        
+        portfolio, counts = [], {name: 0 for name in self.df['Name']}
+        
+        for i in range(n):
+            sim_p = np.random.normal(raw_p, scale).clip(min=0)
+            A, bl, bu = [], [], []
+            
+            # 1. Total Roster Count
+            A.append(np.ones(n_p)); bl.append(9); bu.append(9)
+            # 2. Salary Cap
+            A.append(sals); bl.append(49200); bu.append(50000)
+            
+            # 3. DRAFTKINGS CLASSIC CONSTRAINTS (Includes FLEX Logic)
+            # Position | Min | Max (Allows 1 Flex spot for RB/WR/TE)
+            A.append(self.df['is_QB'].values); bl.append(1); bu.append(1)
+            A.append(self.df['is_RB'].values); bl.append(2); bu.append(3)
+            A.append(self.df['is_WR'].values); bl.append(3); bu.append(4)
+            A.append(self.df['is_TE'].values); bl.append(1); bu.append(2)
+            A.append(self.df['is_DST'].values); bl.append(1); bu.append(1)
 
-# --- UI LAYOUT ---
-st.title("🧪 VANTAGE 99 | INTERACTIVE COMMAND")
+            # 4. Exposure Governor
+            for idx, name in enumerate(self.df['Name']):
+                if counts[name] >= (n * exp):
+                    m = np.zeros(n_p); m[idx] = 1; A.append(m); bl.append(0); bu.append(0)
 
-f = st.file_uploader("LOAD DK DATASET", type="csv")
+            res = milp(c=-sim_p, constraints=LinearConstraint(A, bl, bu), integrality=np.ones(n_p), bounds=Bounds(0, 1))
+            if res.success:
+                idx = np.where(res.x > 0.5)[0]
+                lineup = self.df.iloc[idx].copy()
+                portfolio.append(lineup)
+                for name in lineup['Name']: counts[name] += 1
+        return portfolio
+
+# --- DASHBOARD LAYOUT ---
+st.title("🧪 VANTAGE 99 | ELITE COMMAND")
+f = st.file_uploader("UPLOAD DATASET", type="csv")
+
 if f:
-    engine = InteractiveOptimizer(pd.read_csv(f))
+    df_raw = pd.read_csv(f)
+    if "Field" in str(df_raw.columns): df_raw = pd.read_csv(f, skiprows=7)
+    engine = EliteOptimizer(df_raw)
     
     if 'portfolio' not in st.session_state:
-        if st.button("🚀 ASSEMBLE PORTFOLIO"):
+        if st.button("🚀 INITIATE PORTFOLIO REBALANCING"):
             st.session_state.portfolio = engine.assemble(n=20)
             st.session_state.selected_idx = 0
 
     if 'portfolio' in st.session_state:
-        # --- SCORE HEADER ---
-        avg_proj = np.mean([l['Proj'].sum() for l in st.session_state.portfolio])
-        st.markdown(f"### 📋 PORTFOLIO OVERVIEW <span style='font-size:0.9rem; color:#8b949e; margin-left:20px;'>AVG PROJ: {round(avg_proj, 2)}</span>", unsafe_allow_html=True)
-
-        col_list, col_details = st.columns([1, 1.5])
-
-        with col_list:
+        col_nav, col_main = st.columns([1, 2])
+        
+        with col_nav:
+            st.markdown('<p class="section-header">Portfolio Overview</p>', unsafe_allow_html=True)
             for i, l in enumerate(st.session_state.portfolio):
                 score = round(l['Proj'].sum(), 1)
-                # Clickable Row Logic
                 if st.button(f"L{i+1} | {score} PTS", key=f"btn_{i}"):
                     st.session_state.selected_idx = i
         
-        with col_details:
+        with col_main:
             sel_l = st.session_state.portfolio[st.session_state.selected_idx]
+            st.markdown(f'<p class="section-header">Scouting Report: Lineup #{st.session_state.selected_idx + 1}</p>', unsafe_allow_html=True)
             
-            # --- METRIC BREAKDOWN PANEL ---
-            st.markdown(f"#### 🔍 LINEUP #{st.session_state.selected_idx + 1} BREAKDOWN")
+            # --- OFFICIAL DK ORDERING LOGIC ---
+            qb = sel_l[sel_l['Pos'] == 'QB'].iloc[0]
+            rbs = sel_l[sel_l['Pos'] == 'RB'].sort_values('Sal', ascending=False)
+            wrs = sel_l[sel_l['Pos'] == 'WR'].sort_values('Sal', ascending=False)
+            te = sel_l[sel_l['Pos'] == 'TE'].sort_values('Sal', ascending=False).iloc[0]
+            dst = sel_l[sel_l['Pos'] == 'DST'].iloc[0]
             
+            # Identify FLEX (The one player not in core starters)
+            core_ids = [qb['ID'], rbs.iloc[0]['ID'], rbs.iloc[1]['ID'], wrs.iloc[0]['ID'], wrs.iloc[1]['ID'], wrs.iloc[2]['ID'], te['ID'], dst['ID']]
+            flex = sel_l[~sel_l['ID'].isin(core_ids)].iloc[0]
+            
+            roster_order = [
+                ("QB", qb), ("RB", rbs.iloc[0]), ("RB", rbs.iloc[1]), 
+                ("WR", wrs.iloc[0]), ("WR", wrs.iloc[1]), ("WR", wrs.iloc[2]), 
+                ("TE", te), ("FLEX", flex), ("DST", dst)
+            ]
+            
+            # Render Modern List
+            for label, p in roster_order:
+                st.markdown(f"""
+                <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px; border-bottom: 1px solid #30363d;">
+                    <span><span class="pos-tag">{label}</span> <b>{p['Name']}</b></span>
+                    <span style="color: #8b949e;">{p['Team']} • ${int(p['Sal'])}</span>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # --- METRIC AUDIT PANEL ---
+            st.markdown('<p class="section-header" style="margin-top:25px;">Strategic Audit</p>', unsafe_allow_html=True)
             m1, m2, m3 = st.columns(3)
-            m1.metric("TOTAL OWN", f"{round(sel_l['Own'].sum(), 1)}%", help="Cumulative ownership of the lineup.")
-            m2.metric("LEVERAGE", f"{round(180 - sel_l['Own'].sum(), 1)}", delta="High Upside")
-            m3.metric("SALARY", f"${int(sel_l['Sal'].sum())}")
-
-            # Official DK Order Display
-            st.markdown("---")
-            for _, p in sel_l.sort_values('Sal', ascending=False).iterrows():
-                st.markdown(f"**{p['Pos']}** {p['Name']} <span style='color:#8b949e;'>(${int(p['Sal'])})</span>", unsafe_allow_html=True)
-            
-            # Vegas Correlation Check (Visual Feedback)
-            teams = sel_l['Team'].unique()
-            st.markdown(f"**GAMES REPRESENTED:** {len(teams)}/4")
+            m1.metric("SALARY UTIL", f"${int(sel_l['Sal'].sum())}", f"{int(50000 - sel_l['Sal'].sum())} Left")
+            m2.metric("PROJ SCORE", round(sel_l['Proj'].sum(), 2))
+            m3.metric("GAME DENSITY", f"{len(sel_l['Team'].unique())} Teams")
