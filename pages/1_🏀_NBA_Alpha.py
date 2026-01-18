@@ -4,9 +4,9 @@ import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
 
 # --- ELITE NBA UI CONFIG ---
-st.set_page_config(page_title="VANTAGE 99 | v116.0 NBA", layout="wide", page_icon="🏀")
+st.set_page_config(page_title="VANTAGE 99 | v117.0 NBA", layout="wide", page_icon="🏀")
 
-class EliteNBAGPPOptimizerV116:
+class EliteNBAGPPOptimizerV117:
     def __init__(self, df):
         self.df = df.copy()
         raw_cols = {c.lower().replace(" ", "").replace("_", "").replace("%", ""): c for c in df.columns}
@@ -39,7 +39,7 @@ class EliteNBAGPPOptimizerV116:
         self.clean_df['is_late'] = self.clean_df['Team'].isin(['LAL', 'TOR', 'LALakers', 'Toronto Raptors']).astype(int)
 
     def auto_injury_audit(self):
-        """LIVE AUDIT: 01/18/2026 6:15 PM Injury Report Analysis"""
+        """AUTOMATED AUDIT: 01/18/2026 6:15 PM Injury Report Analysis"""
         out_list = [
             'Etienne, Tyson', 'Highsmith, Haywood', 'Johnson, Chaney', 'Liddell, E.J.',
             'Porter Jr., Michael', 'Powell, Drake', 'Saraf, Ben', 'Williams, Ziaire',
@@ -113,10 +113,10 @@ st.title("🏆 VANTAGE 99 | NBA LIVE AUTO-NUCLEAR")
 f = st.file_uploader("LOAD DK SALARY CSV", type="csv")
 
 if f:
-    df_raw = pd.read_csv(f); engine = EliteNBAGPPOptimizerV116(df_raw)
+    df_raw = pd.read_csv(f); engine = EliteNBAGPPOptimizerV117(df_raw)
     
     if st.button("🚀 EXECUTE 10,000 LIVE-AUDIT SIMS"):
-        engine.auto_injury_audit() # Automated update with Nikola Jokic OUT
+        engine.auto_injury_audit() # Automated update with Nikola Jokic and Tari Eason OUT
         with st.status("Performing Live Injury Audit & Simulating...", expanded=True) as status:
             st.session_state.portfolio = engine.assemble(n_final=10, total_sims=10000)
             st.session_state.sel_idx = 0
