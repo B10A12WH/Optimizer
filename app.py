@@ -5,9 +5,8 @@ from scipy.optimize import milp, LinearConstraint, Bounds
 import plotly.graph_objects as go
 import plotly.express as px
 import time
-import re
 
-# --- ARCHITECTURAL CONFIG ---
+# --- INDUSTRIAL UI ENGINE ---
 st.set_page_config(page_title="VANTAGE 99 | COMMAND", layout="wide", page_icon="🧪")
 
 st.markdown("""
@@ -63,17 +62,20 @@ class TacticalOptimizer:
         return " | ".join(reasons) if reasons else "Balanced Tournament Assembly"
 
     def assemble(self, n=10, exp=0.5, jitter=0.22):
-        # HARDENED ARRAY CASTING (Prevents Broadcasting Error)
+        # --- BULLETPROOF ARRAY CASTING ---
         raw_p = self.df['Proj'].values.astype(np.float64)
         sals = self.df['Sal'].values.astype(np.float64)
         n_p = len(self.df)
+        
+        # Scale Floor: Standard deviation must be > 0 for np.random.normal
+        # Clipping scale at 0.01 prevents the check_array_constraint crash
+        scale = np.clip(raw_p * jitter, 0.01, None)
         
         portfolio, counts = [], {name: 0 for name in self.df['Name']}
         bar = st.progress(0)
         
         for i in range(n):
-            # SAFE SIMULATION
-            sim_p = np.random.normal(raw_p, raw_p * jitter).clip(min=0)
+            sim_p = np.random.normal(raw_p, scale).clip(min=0)
             
             A, bl, bu = [], [], []
             A.append(np.ones(n_p)); bl.append(9); bu.append(9)
