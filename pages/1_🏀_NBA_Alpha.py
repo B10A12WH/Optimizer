@@ -4,9 +4,9 @@ import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
 
 # --- ELITE NBA UI CONFIG ---
-st.set_page_config(page_title="VANTAGE 99 | v108.0 NBA", layout="wide", page_icon="🏀")
+st.set_page_config(page_title="VANTAGE 99 | v109.0 NBA", layout="wide", page_icon="🏀")
 
-class EliteNBAGPPOptimizerV108:
+class EliteNBAGPPOptimizerV109:
     def __init__(self, df):
         self.df = df.copy()
         raw_cols = {c.lower().replace(" ", "").replace("_", "").replace("%", ""): c for c in df.columns}
@@ -27,7 +27,7 @@ class EliteNBAGPPOptimizerV108:
         self.clean_df['Sal'] = hunt(['salary', 'sal', 'cost'], 50000)
         self.clean_df['Own'] = hunt(['ownership', 'own', 'projown', 'roster'], 15.0)
 
-        # 1. POSITION MASKING
+        # 1. LEGAL DK POSITION MASKING (Now including SF)
         for p in ['PG', 'SG', 'SF', 'PF', 'C']:
             self.clean_df[f'mask_{p}'] = self.clean_df['Pos'].str.contains(p).astype(int)
         self.clean_df['mask_G'] = (self.clean_df['mask_PG'] | self.clean_df['mask_SG']).astype(int)
@@ -36,8 +36,8 @@ class EliteNBAGPPOptimizerV108:
         # 2. LATE GAME TAGGING (Tonight: TOR @ LAL - 9:30 PM ET)
         self.clean_df['is_late'] = self.clean_df['Team'].isin(['LAL', 'TOR', 'LALakers', 'Toronto Raptors']).astype(int)
 
-    def auto_injury_boost(self):
-        """INTERNAL DATABASE: 01/18/2026 Injury Report Integration"""
+    def auto_injury_audit(self):
+        """AUTOMATED AUDIT: 01/18/2026 Injury Report Integration"""
         out_list = [
             'Tatum, Jayson', 'Poeltl, Jakob', 'Barrett, RJ', 'Quickley, Immanuel',
             'Porter Jr., Michael', 'Giddey, Josh', 'Williams, Patrick', 'Collins, Zach',
@@ -46,13 +46,11 @@ class EliteNBAGPPOptimizerV108:
             'Wagner, Moritz', 'Haliburton, Tyrese', 'George, Paul'
         ]
         
-        # Baseline: Realistic tournament average (5.2x value)
+        # Baseline Correction: 5.2x baseline for 260-point median
         self.clean_df['Proj'] = (self.clean_df['Sal'] / 1000) * 5.2
-        
-        # Rule out players
         self.clean_df.loc[self.clean_df['Name'].isin(out_list), 'Proj'] = 0.0
         
-        # Usage Migration Logic: Teammates gain 7% per missing teammate
+        # Usage Migration: Teammates gain 7% per missing rotation player
         out_teams = self.clean_df[self.clean_df['Name'].isin(out_list)]['Team'].unique()
         for team in out_teams:
             count = len(self.clean_df[(self.clean_df['Team'] == team) & (self.clean_df['Name'].isin(out_list))])
@@ -63,7 +61,7 @@ class EliteNBAGPPOptimizerV108:
         n_p = len(self.clean_df); raw_p = self.clean_df['Proj'].values.astype(np.float64)
         sals = self.clean_df['Sal'].values.astype(np.float64); owns = self.clean_df['Own'].values.astype(np.float64)
         
-        # 20% JITTER: Targets realistic 350-380 GPP range
+        # 20% JITTER: Corrects 500-point error; targets 350-380 GPP range
         sim_matrix = np.random.normal(loc=raw_p, scale=np.abs(raw_p * 0.20), size=(total_sims, n_p)).clip(min=0)
         
         tiers = [{"name": "Nuclear", "sal": 49700, "stars": 2, "own": 120.0, "pnt": 1}]
@@ -80,6 +78,7 @@ class EliteNBAGPPOptimizerV108:
                 A.append((self.clean_df['Sal'] >= 9400).astype(int).values); bl.append(tier['stars']); bu.append(4)
                 A.append((self.clean_df['Sal'] <= 4400).astype(int).values); bl.append(tier['pnt']); bu.append(3)
 
+                # LEGAL DK SLOTTING
                 for p in ['PG', 'SG', 'SF', 'PF', 'C']: A.append(self.clean_df[f'mask_{p}'].values); bl.append(1); bu.append(8)
                 A.append(self.clean_df['mask_G'].values); bl.append(3); bu.append(8)
                 A.append(self.clean_df['mask_F'].values); bl.append(3); bu.append(8)
@@ -103,12 +102,11 @@ st.title("🏆 VANTAGE 99 | NBA AUTO-NUCLEAR")
 f = st.file_uploader("LOAD DK SALARY CSV", type="csv")
 
 if f:
-    df_raw = pd.read_csv(f); engine = EliteNBAGPPOptimizerV108(df_raw)
+    df_raw = pd.read_csv(f); engine = EliteNBAGPPOptimizerV109(df_raw)
     
-    if st.button("🚀 EXECUTE 10,000 AUTO-SIMS"):
-        # Auto-detects injuries and boosts teammates
-        engine.auto_injury_boost()
-        with st.status("Solving for Late Swap Flexibility...", expanded=True) as status:
+    if st.button("🚀 EXECUTE 10,000 AUTO-AUDIT SIMS"):
+        engine.auto_injury_audit()
+        with st.status("Performing Injury Audit & Simulating...", expanded=True) as status:
             st.session_state.portfolio = engine.assemble(n_final=10, total_sims=10000)
             st.session_state.sel_idx = 0
             if st.session_state.portfolio: status.update(label="10 Realistic GPP Lineups Ready!", state="complete")
@@ -131,9 +129,8 @@ if f:
                 return None, p_df
 
             final_roster, pool = [], l.copy()
-            # CORE POSITIONS: (PG, SG, SF, PF, C)
+            # CORE SLOTS: (PG, SG, SF, PF, C)
             for pos in ['PG', 'SG', 'SF', 'PF', 'C']:
-                # Save late game players for UTIL
                 c = pool[(pool[f'mask_{pos}']==1) & (pool['is_late']==0)].sort_values('Sal', ascending=False)
                 if c.empty: c = pool[pool[f'mask_{pos}']==1].sort_values('Sal', ascending=False)
                 if not c.empty:
@@ -148,7 +145,7 @@ if f:
                     p = c.iloc[0]; final_roster.append({"Pos": flex, "Name": p['Name'], "Team": p['Team'], "Sal": f"${int(p['Sal'])}", "Own": f"{p['Own']}%", "is_late": p['is_late']})
                     pool = pool[pool['ID'] != p['ID']]
 
-            # 4. FINAL UTIL SLOT: Late Game Priority (TOR @ LAL)
+            # 4. FINAL UTIL SLOT: TOR @ LAL (9:30 PM) Late-Swap Lock
             if not pool.empty:
                 u = pool.sort_values('is_late', ascending=False).iloc[0]
                 final_roster.append({"Pos": "UTIL", "Name": u['Name'], "Team": u['Team'], "Sal": f"${int(u['Sal'])}", "Own": f"{u['Own']}%"})
