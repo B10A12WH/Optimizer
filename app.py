@@ -120,4 +120,37 @@ if f:
         team_exposure = pd.Series(all_teams).value_counts()
         cols = st.columns(min(len(team_exposure), 4))
         for i, (team, count) in enumerate(team_exposure.head(4).items()):
-            cols[i].metric(f"TARGET: {team}", f"{int((count/len(all
+            cols[i].metric(f"TARGET: {team}", f"{int((count/len(all_teams))*100)}%", "EXPOSURE")
+
+        # EXPOSURE HUD
+        exp_df = pd.Series([n for l in lineups for n in l['Name'].tolist()]).value_counts().reset_index().head(12)
+        exp_df.columns = ['Player', 'Count']
+        fig = px.sunburst(exp_df, path=['Player'], values='Count', color='Count', color_continuous_scale='Darkmint', template="plotly_dark")
+        fig.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=400)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # SCOUTING REPORTS
+        st.markdown("---")
+        c1, c2 = st.columns(2)
+        for i, l in enumerate(lineups):
+            target = c1 if i % 2 == 0 else c2
+            with target:
+                st.markdown(f"""
+                <div class="lineup-container">
+                    <span class="header-score">{round(l['Proj'].sum(), 1)} PTS</span>
+                    <h4 style="margin:0; color:#00ffcc;">REPORT #{i+1}</h4>
+                    <div style="margin: 15px 0;">
+                """, unsafe_allow_html=True)
+                for _, p in l.sort_values('is_QB', ascending=False).iterrows():
+                    st.markdown(f"""
+                    <div class="player-row">
+                        <span><span class="pos-label">{p['Pos']}</span> <b>{p['Name']}</b></span>
+                        <span style="color:#8b949e;">{p['Team']} • ${int(p['Sal'])}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                st.markdown(f"""
+                    <div class="audit-reasoning">
+                        <strong>💡 THE ANGLE:</strong> {engine.audit_lineup(l)}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
