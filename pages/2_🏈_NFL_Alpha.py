@@ -23,11 +23,18 @@ class EliteOptimizerV64:
         cols = {c.lower().replace(" ", ""): c for c in df.columns}
         self.df = df.copy()
         p_key = next((cols[k] for k in cols if k in ['proj', 'points', 'avgpointspergame']), df.columns[0])
+        
         self.df['Proj'] = pd.to_numeric(df[p_key], errors='coerce').fillna(0.0)
         self.df['Sal'] = pd.to_numeric(df[cols.get('salary', 'Salary')]).fillna(50000)
         self.df['Pos'] = df[cols.get('position', 'Position')].astype(str)
         self.df['Team'] = df[cols.get('teamabbrev', 'TeamAbbrev')].astype(str)
         self.df['ID'] = df[cols.get('id', 'ID')].astype(str)
+        
+        # --- NEW: VEGAS LAYER (Matchup Specific Weighting) ---
+        # Formula: Implied Total / League Avg (21.5)
+        # Favors LAR and NE based on 1/18 lines
+        vegas_boosts = {'HOU': 0.88, 'NE': 1.08, 'LAR': 1.15, 'CHI': 1.04}
+        self.df['Proj'] = self.df.apply(lambda x: x['Proj'] * vegas_boosts.get(x['Team'], 1.0), axis=1)
         
         # JAN 18 GAME WINDOWS: Houston@NE (3 PM), Rams@Chicago (6:30 PM)
         self.df['is_late'] = self.df['Team'].isin(['LAR', 'CHI']).astype(int)
@@ -44,12 +51,10 @@ class EliteOptimizerV64:
         sals = self.df['Sal'].values.astype(np.float64)
         late_mask = self.df['is_late'].values.astype(np.float64)
         
-        # Weather-Adjusted Jitter (Chicago winds + cold)
         scale = np.clip(raw_p * 0.25, 0.01, None)
         portfolio, counts = [], {name: 0 for name in self.df['Name']}
         
         for i in range(n):
-            # Late-Swap Bias: Favor late-game players for the FLEX spot
             adj_p = raw_p + (late_mask * 0.05)
             sim_p = np.random.normal(adj_p, scale).clip(min=0)
             
@@ -57,19 +62,31 @@ class EliteOptimizerV64:
             A.append(np.ones(n_p)); bl.append(9); bu.append(9)
             A.append(sals); bl.append(49200); bu.append(50000)
             
-            # HARD CAP POSITIONS (Strict 1-2-3-1-1-1 Format)
+            # HARD CAP POSITIONS
             A.append(self.df['is_QB'].values); bl.append(1); bu.append(1)
             A.append(self.df['is_RB'].values); bl.append(2); bu.append(3)
             A.append(self.df['is_WR'].values); bl.append(3); bu.append(4)
             A.append(self.df['is_TE'].values); bl.append(1); bu.append(2)
             A.append(self.df['is_DST'].values); bl.append(1); bu.append(1)
 
+            # --- NEW: STACKING CONSTRAINT (QB + WR/TE) ---
+            # Ensures that if a QB is picked, at least one pass-catcher from his team is too
+            for team in self.df['Team'].unique():
+                q_idx = self.df[(self.df['Team'] == team) & (self.df['is_QB'] == 1)].index.tolist()
+                s_idx = self.df[(self.df['Team'] == team) & ((self.df['is_WR'] == 1) | (self.df['is_TE'] == 1))].index.tolist()
+                if q_idx and s_idx:
+                    row = np.zeros(n_p)
+                    for s in s_idx: row[s] = 1 # Coefficient for receivers
+                    for q in q_idx: row[q] = -1 # Coefficient for QB
+                    # Logic: Sum(Receivers) - QB >= 0 (If QB=1, Receivers must be >= 1)
+                    A.append(row); bl.append(0); bu.append(8)
+
             # Exposure Governor
             for idx, name in enumerate(self.df['Name']):
                 if counts[name] >= (n * exp):
                     m = np.zeros(n_p); m[idx] = 1; A.append(m); bl.append(0); bu.append(0)
 
-            res = milp(c=-sim_p, constraints=LinearConstraint(A, bl, bu), integrality=np.ones(n_p), bounds=Bounds(0, 1))
+            res = milp(c=-sim_p, constraints=LinearConstraint(np.vstack(A), bl, bu), integrality=np.ones(n_p), bounds=Bounds(0, 1))
             if res.success:
                 idx = np.where(res.x > 0.5)[0]
                 lineup = self.df.iloc[idx].copy()
@@ -83,7 +100,10 @@ st.title("🧬 VANTAGE 99 | v64.0 COMMAND")
 f = st.file_uploader("LOAD DK DATASET", type="csv")
 if f:
     df_raw = pd.read_csv(f)
-    if "Field" in str(df_raw.columns): df_raw = pd.read_csv(f, skiprows=7)
+    # Handle the DraftKings CSV extra header rows
+    if "Field" in str(df_raw.columns):
+        df_raw = pd.read_csv(f, skiprows=7)
+    
     engine = EliteOptimizerV64(df_raw)
     
     if 'portfolio' not in st.session_state:
@@ -97,9 +117,9 @@ if f:
         with col_list:
             st.markdown("### 📋 PORTFOLIO INDEX")
             for i, l in enumerate(st.session_state.portfolio):
-                # Check for Late-Swap Ready (Player from 6:30 PM game in lineup)
                 has_late = l['is_late'].sum() > 0
                 swap_tag = '<span class="late-swap-ready">SWAP</span>' if has_late else ""
+                # Combined metric label
                 if st.button(f"L{i+1} | {round(l['Proj'].sum(), 1)} PTS", key=f"btn_{i}"):
                     st.session_state.sel_idx = i
 
@@ -121,13 +141,21 @@ if f:
             qb = l[l['Pos'] == 'QB'].iloc[0]
             rbs = l[l['Pos'] == 'RB'].sort_values('Sal', ascending=False)
             wrs = l[l['Pos'] == 'WR'].sort_values('Sal', ascending=False)
-            te = l[l['Pos'] == 'TE'].sort_values('Sal', ascending=False).iloc[0]
+            # Safe catch for single or double TE
+            te_rows = l[l['Pos'] == 'TE'].sort_values('Sal', ascending=False)
+            te = te_rows.iloc[0]
             dst = l[l['Pos'] == 'DST'].iloc[0]
             
+            # FLEX Logic: Identifying the "extra" player not in the primary slots
             core_ids = [qb['ID'], rbs.iloc[0]['ID'], rbs.iloc[1]['ID'], wrs.iloc[0]['ID'], wrs.iloc[1]['ID'], wrs.iloc[2]['ID'], te['ID'], dst['ID']]
-            flex = l[~l['ID'].isin(core_ids)].iloc[0]
+            flex_rows = l[~l['ID'].isin(core_ids)]
+            flex = flex_rows.iloc[0] if not flex_rows.empty else None
             
-            display_order = [("QB", qb), ("RB", rbs.iloc[0]), ("RB", rbs.iloc[1]), ("WR", wrs.iloc[0]), ("WR", wrs.iloc[1]), ("WR", wrs.iloc[2]), ("TE", te), ("FLEX", flex), ("DST", dst)]
+            # Sorting for the display list
+            display_order = [("QB", qb), ("RB", rbs.iloc[0]), ("RB", rbs.iloc[1]), ("WR", wrs.iloc[0]), ("WR", wrs.iloc[1]), ("WR", wrs.iloc[2]), ("TE", te)]
+            if flex is not None:
+                display_order.append(("FLEX", flex))
+            display_order.append(("DST", dst))
             
             for label, p in display_order:
                 st.write(f"**{label}** | {p['Name']} ({p['Team']}) — ${int(p['Sal'])}")
