@@ -4,9 +4,9 @@ import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
 
 # --- ELITE NBA UI CONFIG ---
-st.set_page_config(page_title="VANTAGE 99 | v110.0 NBA", layout="wide", page_icon="🏀")
+st.set_page_config(page_title="VANTAGE 99 | v111.0 NBA", layout="wide", page_icon="🏀")
 
-class EliteNBAGPPOptimizerV110:
+class EliteNBAGPPOptimizerV111:
     def __init__(self, df):
         self.df = df.copy()
         raw_cols = {c.lower().replace(" ", "").replace("_", "").replace("%", ""): c for c in df.columns}
@@ -18,7 +18,7 @@ class EliteNBAGPPOptimizerV110:
                     return pd.to_numeric(df[raw_cols[search_k]], errors='coerce').fillna(default_val)
             return pd.Series([default_val] * len(df))
 
-        # Molecular Data Protection
+        # Molecular Data Protection: Safeguards column names for display logic
         self.clean_df = pd.DataFrame()
         self.clean_df['Name'] = df[next((raw_cols[k] for k in ['name', 'player'] if k in raw_cols), df.columns[0])].astype(str)
         self.clean_df['Team'] = df[next((raw_cols[k] for k in ['team', 'teamabbrev'] if k in raw_cols), df.columns[1])].astype(str)
@@ -27,48 +27,51 @@ class EliteNBAGPPOptimizerV110:
         self.clean_df['Sal'] = hunt(['salary', 'sal', 'cost'], 50000)
         self.clean_df['Own'] = hunt(['ownership', 'own', 'projown', 'roster'], 15.0)
 
-        # 1. LEGAL DK POSITION MASKING (Now including SF)
+        # 1. LEGAL DK POSITION MASKING (Including SF)
         for p in ['PG', 'SG', 'SF', 'PF', 'C']:
             self.clean_df[f'mask_{p}'] = self.clean_df['Pos'].str.contains(p).astype(int)
+        
+        # Flex eligibility
         self.clean_df['mask_G'] = (self.clean_df['mask_PG'] | self.clean_df['mask_SG']).astype(int)
         self.clean_df['mask_F'] = (self.clean_df['mask_SF'] | self.clean_df['mask_PF']).astype(int)
         
-        # 2. LATE GAME TAGGING (Tonight: TOR @ LAL - 9:30 PM ET)
+        # Late Game Tagging: Tonight TOR @ LAL (9:30 PM ET)
         self.clean_df['is_late'] = self.clean_df['Team'].isin(['LAL', 'TOR', 'LALakers', 'Toronto Raptors']).astype(int)
 
     def auto_injury_audit(self):
-        """AUTOMATED AUDIT: 01/18/2026 Injury Report Integration"""
+        """AUTOMATED AUDIT: 01/18/2026 Injury Report Analysis"""
         out_list = [
             'Etienne, Tyson', 'Highsmith, Haywood', 'Johnson, Chaney', 'Liddell, E.J.',
             'Porter Jr., Michael', 'Powell, Drake', 'Saraf, Ben', 'Williams, Ziaire',
-            'Collins, Zach', 'Essengue, Noa', 'Giddey, Josh', 'Williams, Patrick',
-            'Alexander, Trey', 'Alvarado, Jose', 'Dickinson, Hunter', 'Jones, Herbert',
-            'Murray, Dejounte', 'Crawford, Isaiah', 'Eason, Tari', 'Newton, Tristen',
-            'VanVleet, Fred', 'McNeeley, Liam', 'Plumlee, Mason', 'Reeves, Antonio',
-            'Simpson, KJ', 'Williams, Grant', 'Bates, Tamar', 'Braun, Christian',
-            'Johnson, Cameron', 'Jokic, Nikola', 'Jones, Curtis', 'Valanciunas, Jonas',
-            'Henderson, Scoot', 'Lillard, Damian', 'Murray, Kris', 'Thybulle, Matisse',
-            'Wesley, Blake', 'Ellis, Keon', 'Murray, Keegan', 'Barrett, RJ', 
-            'Poeltl, Jakob', 'Walter, Ja\'Kobe', 'Reaves, Austin', 'Thiero, Adou', 
-            'Suggs, Jalen', 'Wagner, Moritz', 'Haliburton, Tyrese', 'George, Paul'
+            'Collins, Zach', 'Essengue, Noa', 'Giddey, Josh', 'Kawamura, Yuki',
+            'Miller, Emanuel', 'Williams, Patrick', 'Alexander, Trey', 'Alvarado, Jose',
+            'Dickinson, Hunter', 'Jones, Herbert', 'Murray, Dejounte', 'Crawford, Isaiah',
+            'Eason, Tari', 'Newton, Tristen', 'VanVleet, Fred', 'McNeeley, Liam',
+            'Plumlee, Mason', 'Reeves, Antonio', 'Simpson, KJ', 'Williams, Grant',
+            'Bates, Tamar', 'Braun, Christian', 'Johnson, Cameron', 'Jokic, Nikola',
+            'Jones, Curtis', 'Valanciunas, Jonas', 'Henderson, Scoot', 'Lillard, Damian',
+            'Murray, Kris', 'Thybulle, Matisse', 'Wesley, Blake', 'Ellis, Keon',
+            'Murray, Keegan', 'Barrett, RJ', 'Poeltl, Jakob', 'Walter, Ja\'Kobe',
+            'Reaves, Austin', 'Thiero, Adou', 'Suggs, Jalen', 'Wagner, Moritz',
+            'Haliburton, Tyrese', 'Toppin, Obi', 'George, Paul'
         ]
         
-        # Baseline Correction: 5.2x baseline for 260-point median
+        # Recalibrated Baseline: 5.2x baseline for realistic 260-point median
         self.clean_df['Proj'] = (self.clean_df['Sal'] / 1000) * 5.2
         self.clean_df.loc[self.clean_df['Name'].isin(out_list), 'Proj'] = 0.0
         
-        # Usage Migration: Teammates gain 7% per missing rotation player
+        # Usage Migration: Boost teammates by 7% per missing player
         out_teams = self.clean_df[self.clean_df['Name'].isin(out_list)]['Team'].unique()
         for team in out_teams:
             count = len(self.clean_df[(self.clean_df['Team'] == team) & (self.clean_df['Name'].isin(out_list))])
-            boost = min(1.25, 1 + (0.07 * count))
+            boost = min(1.25, 1 + (0.07 * count)) # Capped boost for realism
             self.clean_df.loc[(self.clean_df['Team'] == team) & (self.clean_df['Proj'] > 0), 'Proj'] *= boost
 
     def assemble(self, n_final=10, total_sims=10000):
         n_p = len(self.clean_df); raw_p = self.clean_df['Proj'].values.astype(np.float64)
         sals = self.clean_df['Sal'].values.astype(np.float64); owns = self.clean_df['Own'].values.astype(np.float64)
         
-        # 20% JITTER: Corrects 500-point error; targets 350-380 GPP range
+        # 20% JITTER: Corrects 500-pt error; targets 350-380 GPP range
         sim_matrix = np.random.normal(loc=raw_p, scale=np.abs(raw_p * 0.20), size=(total_sims, n_p)).clip(min=0)
         
         tiers = [{"name": "Nuclear", "sal": 49700, "stars": 2, "own": 120.0, "pnt": 1}]
@@ -85,7 +88,7 @@ class EliteNBAGPPOptimizerV110:
                 A.append((self.clean_df['Sal'] >= 9400).astype(int).values); bl.append(tier['stars']); bu.append(4)
                 A.append((self.clean_df['Sal'] <= 4400).astype(int).values); bl.append(tier['pnt']); bu.append(3)
 
-                # LEGAL DK SLOTTING
+                # LEGAL DK SLOTTING CONSTRAINTS
                 for p in ['PG', 'SG', 'SF', 'PF', 'C']: A.append(self.clean_df[f'mask_{p}'].values); bl.append(1); bu.append(8)
                 A.append(self.clean_df['mask_G'].values); bl.append(3); bu.append(8)
                 A.append(self.clean_df['mask_F'].values); bl.append(3); bu.append(8)
@@ -109,10 +112,10 @@ st.title("🏆 VANTAGE 99 | NBA AUTO-NUCLEAR")
 f = st.file_uploader("LOAD DK SALARY CSV", type="csv")
 
 if f:
-    df_raw = pd.read_csv(f); engine = EliteNBAGPPOptimizerV110(df_raw)
+    df_raw = pd.read_csv(f); engine = EliteNBAGPPOptimizerV111(df_raw)
     
     if st.button("🚀 EXECUTE 10,000 AUTO-AUDIT SIMS"):
-        engine.auto_injury_audit()
+        engine.auto_injury_audit() # Automated update with Cameron Johnson OUT
         with st.status("Performing Injury Audit & Simulating...", expanded=True) as status:
             st.session_state.portfolio = engine.assemble(n_final=10, total_sims=10000)
             st.session_state.sel_idx = 0
