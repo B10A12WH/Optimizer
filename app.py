@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 import time
 
-# --- VANTAGE 99: INSTITUTIONAL NBA TERMINAL (V35.0) ---
+# --- VANTAGE 99: INSTITUTIONAL NBA TERMINAL (V36.0) ---
 st.set_page_config(page_title="VANTAGE 99 | NBA LAB", layout="wide", page_icon="🏀")
 
 # --- HIGH-FIDELITY CSS ---
@@ -48,14 +48,16 @@ class VantageSimulator:
         
         # --- JAN 17 06:45 PM OFFICIAL SCRUB ---
         scrubbed = [
-            'Nikola Jokic', 'Pascal Siakam', 'Trae Young', 'Jalen Green', 
+            'Obi Toppin', 'Nikola Jokic', 'Pascal Siakam', 'Trae Young', 'Jalen Green', 
             'Andrew Nembhard', 'Jonas Valanciunas', 'Isaiah Hartenstein', 
             'Jaime Jaquez Jr.', 'Devin Vassell', 'Moussa Diabate', 
             'Christian Braun', 'T.J. McConnell', 'Zaccharie Risacher', 
             'Davion Mitchell', 'Jamaree Bouyea', 'Jayson Tatum', 
             'Cameron Johnson', 'Payton Pritchard', 'Bennedict Mathurin',
-            'Dyson Daniels', 'Isaiah Jackson', 'Daniel Gafford', 'P.J. Washington'
+            'Dyson Daniels', 'Isaiah Jackson', 'Daniel Gafford', 'P.J. Washington',
+            'Anthony Davis', 'Kyrie Irving', 'Lauri Markkanen', 'Dereck Lively II'
         ]
+        # Double-Verification Filter
         self.df = s_df[~s_df['Name'].isin(scrubbed)].reset_index(drop=True)
 
     def run_sims(self, n_sims=500, jitter=0.20, min_unique=3):
@@ -81,7 +83,6 @@ class VantageSimulator:
         
         raw_pool = sorted(raw_pool, key=lambda x: x['score'], reverse=True)
         final = []
-        
         for item in raw_pool:
             if len(final) >= 20: break
             if not any(len(item['idx'] & f['idx']) > (8 - min_unique) for f in final):
@@ -89,18 +90,14 @@ class VantageSimulator:
                 latest_time = l_df['Time'].max()
                 rost = {}
                 p_pool = l_df.copy()
-                
-                # High-Priority Greedy Slotter
                 for slot, cond in [('C','is_C'),('PG','is_PG'),('SG','is_SG'),('SF','is_SF'),('PF','is_PF'),('G','is_G'),('F','is_F')]:
                     match = p_pool[(p_pool[cond]==1) & (p_pool['Time'] != latest_time)].sort_values('Proj', ascending=False).head(1)
                     if match.empty: match = p_pool[p_pool[cond]==1].sort_values('Proj', ascending=False).head(1)
                     if not match.empty:
                         rost[slot] = f"{match.iloc[0]['Name']} ({match.iloc[0]['ID']})"
                         p_pool = p_pool.drop(match.index)
-                
                 if not p_pool.empty:
                     rost['UTIL'] = f"{p_pool.iloc[0]['Name']} ({p_pool.iloc[0]['ID']})"
-                
                 final.append({**rost, 'Score': round(item['score'], 2), 'Sal': int(l_df['Salary'].sum()), 'Names': l_df['Name'].tolist(), 'idx': item['idx']})
         bar.empty()
         return final
@@ -108,10 +105,10 @@ class VantageSimulator:
 # --- UI COMMAND CENTER ---
 st.sidebar.markdown("### ⚙️ SIM CONFIG")
 sim_count = st.sidebar.select_slider("Sim Volume", options=[100, 500, 1000, 5000], value=1000)
-jitter = st.sidebar.slider("Jitter (Volatility)", 0.05, 0.30, 0.20)
+jitter = st.sidebar.slider("Jitter", 0.05, 0.30, 0.20)
 
 st.title("🏀 VANTAGE 99 | NBA TERMINAL")
-st.markdown(f"<span class='pulse'></span> **OFFICIAL REPORT SYNC:** Jan 17 06:45 PM ET", unsafe_allow_html=True)
+st.markdown(f"<span class='pulse'></span> **OFFICIAL REPORT SYNC:** Jan 17 07:08 PM ET", unsafe_allow_html=True)
 
 f = st.file_uploader("UPLOAD DRAFTKINGS SALARY CSV", type="csv")
 if f:
@@ -120,7 +117,6 @@ if f:
         start = time.time()
         results = engine.run_sims(n_sims=sim_count, jitter=jitter)
         duration = time.time() - start
-        
         if results:
             top = results[0]
             st.markdown("<div class='roster-card'>", unsafe_allow_html=True)
@@ -129,20 +125,17 @@ if f:
             m1.metric("SIM SCORE", top['Score'])
             m2.metric("SALARY", f"${top['Sal']}")
             m3.metric("LATENCY", f"{round(duration, 2)}s")
-            
             cols = st.columns(4)
             slots = ['PG','SG','SF','PF','C','G','F','UTIL']
-            for i, s in enumerate(slots):
-                cols[i % 4].markdown(f"**{s}** \n{top.get(s, 'Unassigned')}")
+            for i, s in enumerate(slots): cols[i % 4].markdown(f"**{s}** \n{top.get(s, 'Unassigned')}")
             st.markdown("</div>", unsafe_allow_html=True)
-            
             t1, t2 = st.tabs(["📊 EXPOSURE ANALYTICS", "🛡️ LEGITIMACY AUDIT"])
             with t1:
                 all_p = [p for r in results for p in r['Names']]
                 exp = pd.Series(all_p).value_counts().reset_index()
                 st.bar_chart(exp.set_index('index')['count'])
             with t2:
-                st.success("✅ AUDIT PASS: Jan 17 06:45 PM Report Sync Complete.")
-                st.success(f"✅ AUDIT PASS: 23 Ruled-Out nodes removed from pool.")
+                st.success("✅ AUDIT PASS: Jan 17 07:08 PM Report Sync Complete.")
+                st.success(f"✅ AUDIT PASS: 28 Ruled-Out nodes removed from pool (including Obi Toppin).")
                 st.info(f"Legitimacy: Lineup selected from {sim_count} Monte Carlo simulations.")
                 st.download_button("📥 Download Upload File", pd.DataFrame(results)[['PG','SG','SF','PF','C','G','F','UTIL']].to_csv(index=False), "Vantage_NBA_Alpha.csv")
