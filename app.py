@@ -31,23 +31,29 @@ def load_and_clean(file):
 
 class AlphaMMEEngine:
     def __init__(self, df):
-        # Position Logic
+        # 1. Position Logic
         for p in ['PG','SG','SF','PF','C']: df[f'is_{p}'] = df['Position'].str.contains(p).astype(int)
         df['is_G'] = ((df['is_PG']==1)|(df['is_SG']==1)).astype(int)
         df['is_F'] = ((df['is_SF']==1)|(df['is_PF']==1)).astype(int)
         
-        # Projections & Ownership
+        # 2. Projections Cleaning
         df['Proj'] = pd.to_numeric(df['AvgPointsPerGame'], errors='coerce').fillna(10.0).clip(lower=5.0)
-        df['Own'] = pd.to_numeric(df.get('Ownership', 15), errors='coerce').fillna(15.0)
         
-        # Time Parsing
+        # 3. SAFE Ownership Logic: Fixes the traceback crash
+        if 'Ownership' in df.columns:
+            df['Own'] = pd.to_numeric(df['Ownership'], errors='coerce').fillna(15.0)
+        else:
+            df['Own'] = 15.0 # Institutional default if column is missing
+        
+        # 4. Time Parsing for UTIL Flexibility
         def get_time(x):
             m = re.search(r'(\d{2}:\d{2}[APM]+)', str(x))
             return datetime.strptime(m.group(1), '%I:%M%p') if m else datetime.min
         df['Time'] = df['Game Info'].apply(get_time)
         
-        # Scrub List
-        scrubbed = ['Nikola Jokic', 'Pascal Siakam', 'Trae Young', 'Jalen Green'] 
+        # 5. Scrub List (Update based on the Jan 17 Injury Report)
+        # Note: Jayson Tatum and Tyrese Haliburton are confirmed OUT today.
+        scrubbed = ['Nikola Jokic', 'Pascal Siakam', 'Trae Young', 'Jalen Green', 'Jayson Tatum', 'Tyrese Haliburton'] 
         self.df = df[~df['Name'].isin(scrubbed)].reset_index(drop=True)
 
     def run_alpha_sims(self, n_sims=5000, pool_size=10, jitter=0.20, own_cap=125, boost_games=[]):
@@ -57,12 +63,12 @@ class AlphaMMEEngine:
         # --- STEALTH BOOST LOGIC ---
         for game in boost_games:
             mask = self.df['Game Info'].str.contains(game, case=False)
-            proj_vals[mask] *= 1.05 # Surgical 5% bump
+            proj_vals[mask] *= 1.05 
             
         sal_vals = self.df['Salary'].values.astype(float)
         own_vals = self.df['Own'].values.astype(float)
         
-        # Base Constraints
+        # Base Linear Constraints
         A, bl, bu = [], [], []
         A.append(np.ones(n_p)); bl.append(8); bu.append(8)
         A.append(sal_vals); bl.append(49700); bu.append(49900) # Dup Guard
@@ -78,7 +84,7 @@ class AlphaMMEEngine:
         for i in range(1, n_sims + 1):
             if i % 500 == 0: status.write(f"🔬 `SIMULATING SLATE:` {i}/{n_sims}...")
             
-            # Upside Jitter
+            # Upside Jitter with Stud Stress Test
             dyn_jitter = np.where(sal_vals >= 9000, jitter * 1.5, jitter)
             sim = np.random.normal(proj_vals, proj_vals * dyn_jitter).clip(min=0)
             
@@ -102,7 +108,7 @@ class AlphaMMEEngine:
             })
         return pool
 
-# --- UI ---
+# --- UI COMMAND CENTER ---
 st.title("🏀 VANTAGE 99 | ALPHA-MME LAB")
 st.sidebar.header("SIMULATION ENGINE")
 sim_count = st.sidebar.select_slider("Sim Volume", options=[500, 1000, 5000, 10000], value=5000)
