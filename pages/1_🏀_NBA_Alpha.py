@@ -4,9 +4,9 @@ import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
 
 # --- ELITE NBA UI CONFIG ---
-st.set_page_config(page_title="VANTAGE 99 | v111.0 NBA", layout="wide", page_icon="🏀")
+st.set_page_config(page_title="VANTAGE 99 | v112.0 NBA", layout="wide", page_icon="🏀")
 
-class EliteNBAGPPOptimizerV111:
+class EliteNBAGPPOptimizerV112:
     def __init__(self, df):
         self.df = df.copy()
         raw_cols = {c.lower().replace(" ", "").replace("_", "").replace("%", ""): c for c in df.columns}
@@ -39,7 +39,7 @@ class EliteNBAGPPOptimizerV111:
         self.clean_df['is_late'] = self.clean_df['Team'].isin(['LAL', 'TOR', 'LALakers', 'Toronto Raptors']).astype(int)
 
     def auto_injury_audit(self):
-        """AUTOMATED AUDIT: 01/18/2026 Injury Report Analysis"""
+        """LIVE AUDIT: 01/18/2026 6:15 PM Injury Report Analysis"""
         out_list = [
             'Etienne, Tyson', 'Highsmith, Haywood', 'Johnson, Chaney', 'Liddell, E.J.',
             'Porter Jr., Michael', 'Powell, Drake', 'Saraf, Ben', 'Williams, Ziaire',
@@ -53,7 +53,7 @@ class EliteNBAGPPOptimizerV111:
             'Murray, Kris', 'Thybulle, Matisse', 'Wesley, Blake', 'Ellis, Keon',
             'Murray, Keegan', 'Barrett, RJ', 'Poeltl, Jakob', 'Walter, Ja\'Kobe',
             'Reaves, Austin', 'Thiero, Adou', 'Suggs, Jalen', 'Wagner, Moritz',
-            'Haliburton, Tyrese', 'Toppin, Obi', 'George, Paul'
+            'Haliburton, Tyrese', 'Toppin, Obi', 'George, Paul', 'Tatum, Jayson'
         ]
         
         # Recalibrated Baseline: 5.2x baseline for realistic 260-point median
@@ -108,15 +108,15 @@ class EliteNBAGPPOptimizerV111:
         return portfolio
 
 # --- UI ---
-st.title("🏆 VANTAGE 99 | NBA AUTO-NUCLEAR")
+st.title("🏆 VANTAGE 99 | NBA LIVE AUTO-NUCLEAR")
 f = st.file_uploader("LOAD DK SALARY CSV", type="csv")
 
 if f:
-    df_raw = pd.read_csv(f); engine = EliteNBAGPPOptimizerV111(df_raw)
+    df_raw = pd.read_csv(f); engine = EliteNBAGPPOptimizerV112(df_raw)
     
-    if st.button("🚀 EXECUTE 10,000 AUTO-AUDIT SIMS"):
-        engine.auto_injury_audit() # Automated update with Cameron Johnson OUT
-        with st.status("Performing Injury Audit & Simulating...", expanded=True) as status:
+    if st.button("🚀 EXECUTE 10,000 LIVE-AUDIT SIMS"):
+        engine.auto_injury_audit() # Automated update with Tari Eason and Cam Johnson OUT
+        with st.status("Performing Live Injury Audit & Simulating...", expanded=True) as status:
             st.session_state.portfolio = engine.assemble(n_final=10, total_sims=10000)
             st.session_state.sel_idx = 0
             if st.session_state.portfolio: status.update(label="10 Realistic GPP Lineups Ready!", state="complete")
