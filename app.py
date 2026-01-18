@@ -2,33 +2,30 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
-import plotly.graph_objects as go
 
-# --- CONFIG & THEME ---
+# --- ELITE UI CONFIG ---
 st.set_page_config(page_title="VANTAGE 99 | ELITE", layout="wide", page_icon="🧪")
 
 st.markdown("""
     <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
     .main { background-color: #0b0e14; color: #e0e0e0; font-family: 'Inter', sans-serif; }
     
-    /* Left Pane Scrollable List */
-    .lineup-item {
-        background: #161b22;
-        border: 1px solid #30363d;
-        border-radius: 4px;
-        padding: 10px;
-        margin-bottom: 5px;
-        cursor: pointer;
+    /* Master-Detail Split */
+    .lineup-row {
+        background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+        padding: 12px; margin-bottom: 8px; cursor: pointer; transition: 0.2s;
+        display: flex; justify-content: space-between; align-items: center;
     }
-    .lineup-item:hover { border-color: #00ffcc; background: #1c2128; }
+    .lineup-row:hover { border-color: #00ffcc; background: #1c2128; }
     
-    /* Audit Header Labels */
-    .audit-label { font-size: 0.7rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
-    .audit-val { font-size: 1rem; font-weight: bold; color: #00ffcc; }
+    /* Scouting Report Styles */
+    .scouting-card { background: #0d1117; border: 1px solid #00ffcc; border-radius: 12px; padding: 25px; position: sticky; top: 20px; }
+    .slot-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #21262d; }
+    .pos-label { color: #00ffcc; font-family: 'JetBrains Mono'; font-weight: bold; width: 50px; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- ENGINE: HARD-CAP POSITIONING ---
 class EliteOptimizer:
     def __init__(self, df):
         cols = {c.lower().replace(" ", ""): c for c in df.columns}
@@ -39,53 +36,97 @@ class EliteOptimizer:
         self.df['Pos'] = df[cols.get('position', 'Position')].astype(str)
         self.df['Team'] = df[cols.get('teamabbrev', 'TeamAbbrev')].astype(str)
         self.df['ID'] = df[cols.get('id', 'ID')].astype(str)
+        
         for p in ['QB','RB','WR','TE','DST']: self.df[f'is_{p}'] = (self.df['Pos'] == p).astype(int)
         self.df = self.df[~self.df['Name'].isin(['Nico Collins', 'Justin Watson'])].reset_index(drop=True)
 
-    def assemble(self, n=20):
-        # ... [Hardened MILP Solver Logic] ...
-        # Ensures exactly: 1 QB, 2-3 RB, 3-4 WR, 1-2 TE, 1 DST
-        return [self.df.sample(9) for _ in range(n)] # Placeholder for the 20-batch results
+    def assemble(self, n=20, exp=0.5):
+        n_p = len(self.df)
+        raw_p = self.df['Proj'].values.astype(np.float64)
+        sals = self.df['Sal'].values.astype(np.float64)
+        scale = np.clip(raw_p * 0.22, 0.01, None)
+        
+        portfolio, counts = [], {name: 0 for name in self.df['Name']}
+        
+        for i in range(n):
+            sim_p = np.random.normal(raw_p, scale).clip(min=0)
+            A, bl, bu = [], [], []
+            
+            # --- THE HARDSTOP CONSTRAINTS ---
+            A.append(np.ones(n_p)); bl.append(9); bu.append(9) # 9 total players
+            A.append(sals); bl.append(49200); bu.append(50000) # Salary Cap
+            
+            # Position | Min | Max (including FLEX)
+            A.append(self.df['is_QB'].values); bl.append(1); bu.append(1)
+            A.append(self.df['is_RB'].values); bl.append(2); bu.append(3) # Max 3 RBs
+            A.append(self.df['is_WR'].values); bl.append(3); bu.append(4) # Max 4 WRs
+            A.append(self.df['is_TE'].values); bl.append(1); bu.append(2) # Max 2 TEs
+            A.append(self.df['is_DST'].values); bl.append(1); bu.append(1)
 
-# --- INTERACTIVE UI ---
-st.title("🧪 VANTAGE 99 | COMMAND")
+            # Global Exposure Governor
+            for idx, name in enumerate(self.df['Name']):
+                if counts[name] >= (n * exp):
+                    m = np.zeros(n_p); m[idx] = 1; A.append(m); bl.append(0); bu.append(0)
+
+            res = milp(c=-sim_p, constraints=LinearConstraint(A, bl, bu), integrality=np.ones(n_p), bounds=Bounds(0, 1))
+            if res.success:
+                idx = np.where(res.x > 0.5)[0]
+                portfolio.append(self.df.iloc[idx].copy())
+                for name in self.df.iloc[idx]['Name']: counts[name] += 1
+        return portfolio
+
+# --- DASHBOARD RENDERER ---
+st.title("🧪 VANTAGE 99 | ELITE COMMAND")
+
 f = st.file_uploader("LOAD DK DATASET", type="csv")
-
 if f:
-    engine = EliteOptimizer(pd.read_csv(f))
+    df_raw = pd.read_csv(f)
+    if "Field" in str(df_raw.columns): df_raw = pd.read_csv(f, skiprows=7)
+    engine = EliteOptimizer(df_raw)
+    
     if 'portfolio' not in st.session_state:
         if st.button("🚀 ASSEMBLE PORTFOLIO"):
-            st.session_state.portfolio = engine.assemble(20)
+            st.session_state.portfolio = engine.assemble(n=20)
             st.session_state.sel_idx = 0
 
     if 'portfolio' in st.session_state:
-        col_list, col_report = st.columns([1, 1.8])
+        col_list, col_scout = st.columns([1, 1.5])
 
         with col_list:
-            st.markdown("### 📋 PORTFOLIO")
+            st.markdown("### 📋 PORTFOLIO INDEX")
             for i, l in enumerate(st.session_state.portfolio):
-                # We use a button to act as a "Clickable Row"
-                if st.button(f"L{i+1} | {round(l['Proj'].sum(), 1)} PTS", key=f"row_{i}"):
+                score = round(l['Proj'].sum(), 1)
+                if st.button(f"L{i+1} | {score} PTS", key=f"btn_{i}"):
                     st.session_state.sel_idx = i
 
-        with col_report:
+        with col_scout:
             l = st.session_state.portfolio[st.session_state.sel_idx]
-            st.markdown(f"### 🔍 SCOUTING REPORT: LINEUP #{st.session_state.sel_idx + 1}")
+            # --- DRAFTKINGS OFFICIAL ORDERING ---
+            qb = l[l['Pos'] == 'QB'].iloc[0]
+            rbs = l[l['Pos'] == 'RB'].sort_values('Sal', ascending=False)
+            wrs = l[l['Pos'] == 'WR'].sort_values('Sal', ascending=False)
+            te = l[l['Pos'] == 'TE'].sort_values('Sal', ascending=False).iloc[0]
+            dst = l[l['Pos'] == 'DST'].iloc[0]
             
-            # --- POSITIONAL AUDIT ---
-            p_counts = l['Pos'].value_counts()
-            a1, a2, a3, a4, a5 = st.columns(5)
-            a1.markdown(f"<span class='audit-label'>QB</span><br><span class='audit-val'>{p_counts.get('QB', 0)}/1</span>", unsafe_allow_html=True)
-            a2.markdown(f"<span class='audit-label'>RB</span><br><span class='audit-val'>{p_counts.get('RB', 0)}/3</span>", unsafe_allow_html=True)
-            a3.markdown(f"<span class='audit-label'>WR</span><br><span class='audit-val'>{p_counts.get('WR', 0)}/4</span>", unsafe_allow_html=True)
-            a4.markdown(f"<span class='audit-label'>TE</span><br><span class='audit-val'>{p_counts.get('TE', 0)}/2</span>", unsafe_allow_html=True)
-            a5.markdown(f"<span class='audit-label'>DST</span><br><span class='audit-val'>{p_counts.get('DST', 0)}/1</span>", unsafe_allow_html=True)
+            # Find Flex (The remaining RB/WR/TE)
+            core_ids = [qb['ID'], rbs.iloc[0]['ID'], rbs.iloc[1]['ID'], wrs.iloc[0]['ID'], wrs.iloc[1]['ID'], wrs.iloc[2]['ID'], te['ID'], dst['ID']]
+            flex = l[~l['ID'].isin(core_ids)].iloc[0]
             
-            # --- THE ROSTER GRID ---
-            st.markdown("---")
-            # [Logic to sort: QB, RB, RB, WR, WR, WR, TE, FLEX, DST]
-            for _, p in l.sort_values('Sal', ascending=False).iterrows():
-                st.markdown(f"**{p['Pos']}** | {p['Name']} ({p['Team']}) — ${int(p['Sal'])}")
+            roster = [("QB", qb), ("RB", rbs.iloc[0]), ("RB", rbs.iloc[1]), ("WR", wrs.iloc[0]), ("WR", wrs.iloc[1]), ("WR", wrs.iloc[2]), ("TE", te), ("FLEX", flex), ("DST", dst)]
+
+            st.markdown(f"""
+            <div class="scouting-card">
+                <h3 style="margin-top:0; color:#00ffcc;">SCOUTING REPORT: LINEUP #{st.session_state.sel_idx+1}</h3>
+                <p style="color:#8b949e; font-size:0.9rem;">TOTAL SALARY: ${int(l['Sal'].sum())} / $50,000</p>
+                <div style="margin-bottom:20px;"></div>
+            """, unsafe_allow_html=True)
             
-            st.markdown("---")
-            st.download_button("📥 DOWNLOAD DK CSV", "dummy_data", f"L{st.session_state.sel_idx+1}.csv")
+            for label, p in roster:
+                st.markdown(f"""
+                <div class="slot-row">
+                    <span class="pos-label">{label}</span>
+                    <span style="font-weight:bold;">{p['Name']}</span>
+                    <span style="color:#8b949e;">{p['Team']} • ${int(p['Sal'])}</span>
+                </div>
+                """, unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
