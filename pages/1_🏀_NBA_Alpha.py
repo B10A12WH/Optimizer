@@ -4,9 +4,9 @@ import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
 
 # --- ELITE NBA UI CONFIG ---
-st.set_page_config(page_title="VANTAGE 99 | v109.0 NBA", layout="wide", page_icon="🏀")
+st.set_page_config(page_title="VANTAGE 99 | v110.0 NBA", layout="wide", page_icon="🏀")
 
-class EliteNBAGPPOptimizerV109:
+class EliteNBAGPPOptimizerV110:
     def __init__(self, df):
         self.df = df.copy()
         raw_cols = {c.lower().replace(" ", "").replace("_", "").replace("%", ""): c for c in df.columns}
@@ -39,11 +39,18 @@ class EliteNBAGPPOptimizerV109:
     def auto_injury_audit(self):
         """AUTOMATED AUDIT: 01/18/2026 Injury Report Integration"""
         out_list = [
-            'Tatum, Jayson', 'Poeltl, Jakob', 'Barrett, RJ', 'Quickley, Immanuel',
-            'Porter Jr., Michael', 'Giddey, Josh', 'Williams, Patrick', 'Collins, Zach',
-            'Murray, Dejounte', 'VanVleet, Fred', 'Jokic, Nikola', 'Lillard, Damian',
-            'Henderson, Scoot', 'Reaves, Austin', 'Thiero, Adou', 'Suggs, Jalen',
-            'Wagner, Moritz', 'Haliburton, Tyrese', 'George, Paul'
+            'Etienne, Tyson', 'Highsmith, Haywood', 'Johnson, Chaney', 'Liddell, E.J.',
+            'Porter Jr., Michael', 'Powell, Drake', 'Saraf, Ben', 'Williams, Ziaire',
+            'Collins, Zach', 'Essengue, Noa', 'Giddey, Josh', 'Williams, Patrick',
+            'Alexander, Trey', 'Alvarado, Jose', 'Dickinson, Hunter', 'Jones, Herbert',
+            'Murray, Dejounte', 'Crawford, Isaiah', 'Eason, Tari', 'Newton, Tristen',
+            'VanVleet, Fred', 'McNeeley, Liam', 'Plumlee, Mason', 'Reeves, Antonio',
+            'Simpson, KJ', 'Williams, Grant', 'Bates, Tamar', 'Braun, Christian',
+            'Johnson, Cameron', 'Jokic, Nikola', 'Jones, Curtis', 'Valanciunas, Jonas',
+            'Henderson, Scoot', 'Lillard, Damian', 'Murray, Kris', 'Thybulle, Matisse',
+            'Wesley, Blake', 'Ellis, Keon', 'Murray, Keegan', 'Barrett, RJ', 
+            'Poeltl, Jakob', 'Walter, Ja\'Kobe', 'Reaves, Austin', 'Thiero, Adou', 
+            'Suggs, Jalen', 'Wagner, Moritz', 'Haliburton, Tyrese', 'George, Paul'
         ]
         
         # Baseline Correction: 5.2x baseline for 260-point median
@@ -102,7 +109,7 @@ st.title("🏆 VANTAGE 99 | NBA AUTO-NUCLEAR")
 f = st.file_uploader("LOAD DK SALARY CSV", type="csv")
 
 if f:
-    df_raw = pd.read_csv(f); engine = EliteNBAGPPOptimizerV109(df_raw)
+    df_raw = pd.read_csv(f); engine = EliteNBAGPPOptimizerV110(df_raw)
     
     if st.button("🚀 EXECUTE 10,000 AUTO-AUDIT SIMS"):
         engine.auto_injury_audit()
