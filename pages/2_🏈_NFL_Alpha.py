@@ -72,3 +72,7 @@ if f:
                 
     except Exception as e:
         st.error(f"Mobile Error: {e}")
+        
+st.session_state.total_sims += sims
+st.session_state.sim_speed = round(sims / (end_time - start_time), 0)
+
