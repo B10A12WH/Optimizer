@@ -4,11 +4,12 @@ import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
 
 # --- ELITE NBA UI CONFIG ---
-st.set_page_config(page_title="VANTAGE 99 | v104.0 NBA", layout="wide", page_icon="🏀")
+st.set_page_config(page_title="VANTAGE 99 | v105.0 NBA", layout="wide", page_icon="🏀")
 
-class EliteNBAGPPOptimizerV104:
+class EliteNBAGPPOptimizerV105:
     def __init__(self, df):
         self.df = df.copy()
+        # High-Speed Column Mapping
         raw_cols = {c.lower().replace(" ", "").replace("_", "").replace("%", ""): c for c in df.columns}
         
         def hunt(keys, default_val=0.0):
@@ -18,7 +19,7 @@ class EliteNBAGPPOptimizerV104:
                     return pd.to_numeric(df[raw_cols[search_k]], errors='coerce').fillna(default_val)
             return pd.Series([default_val] * len(df))
 
-        # Standardized DataFrame Creation
+        # Standardized DataFrame (Molecular Data Protection)
         self.clean_df = pd.DataFrame()
         self.clean_df['Name'] = df[next((raw_cols[k] for k in ['name', 'player'] if k in raw_cols), df.columns[0])].astype(str)
         self.clean_df['Team'] = df[next((raw_cols[k] for k in ['team', 'teamabbrev'] if k in raw_cols), df.columns[1])].astype(str)
@@ -27,21 +28,24 @@ class EliteNBAGPPOptimizerV104:
         self.clean_df['Sal'] = hunt(['salary', 'sal', 'cost'], 50000)
         self.clean_df['Own'] = hunt(['ownership', 'own', 'projown', 'roster'], 15.0)
 
-        # 1. POSITION MASKING (Legal DK Roster Logic)
+        # 1. LEGAL DK POSITION MASKING
+        # In NBA, many players have dual eligibility (e.g. PG/SG). Masks handle this logic.
         for p in ['PG', 'SG', 'SF', 'PF', 'C']:
             self.clean_df[f'mask_{p}'] = self.clean_df['Pos'].str.contains(p).astype(int)
+        
+        # Guard/Forward Flex Slots
         self.clean_df['mask_G'] = (self.clean_df['mask_PG'] | self.clean_df['mask_SG']).astype(int)
         self.clean_df['mask_F'] = (self.clean_df['mask_SF'] | self.clean_df['mask_PF']).astype(int)
 
     def generate_realistic_projections(self, out_players):
-        """Generates realistic 350-380pt ceilings based on 7x Value"""
-        # Baseline: NBA GPP winners average ~7x value for a 350-point score
-        # We start with a 6.2x median baseline
-        self.clean_df['Proj'] = (self.clean_df['Sal'] / 1000) * 6.2
+        """Generates 350-380pt ceilings based on 6.0x value baseline"""
+        # Recalibrated Multiplier: 6.0x baseline provides the realistic GPP floor
+        self.clean_df['Proj'] = (self.clean_df['Sal'] / 1000) * 6.0
         
+        # Zero out players ruled OUT
         self.clean_df.loc[self.clean_df['Name'].isin(out_players), 'Proj'] = 0.0
         
-        # Usage Migration: Teammates gain ~10% usage per missing teammate
+        # Usage Migration: Teammates gain 10% usage per missing teammate on the same squad
         out_teams = self.clean_df[self.clean_df['Name'].isin(out_players)]['Team'].unique()
         for team in out_teams:
             count = len(self.clean_df[(self.clean_df['Team'] == team) & (self.clean_df['Name'].isin(out_players))])
@@ -53,7 +57,8 @@ class EliteNBAGPPOptimizerV104:
         sals = self.clean_df['Sal'].values.astype(np.float64)
         owns = self.clean_df['Own'].values.astype(np.float64)
         
-        # 2. TARGETED CEILING SIMULATION: Using 25% Jitter for realistic volatility
+        # 2. TARGETED CEILING SIMULATION: 25% Jitter creates the outlier range
+        # This jitter identifies the rare nights where players hit 8x+ value.
         sim_matrix = np.random.normal(loc=raw_p, scale=np.abs(raw_p * 0.25), size=(total_sims, n_p)).clip(min=0)
         
         tiers = [
@@ -71,11 +76,11 @@ class EliteNBAGPPOptimizerV104:
                 A.append(sals); bl.append(tier['sal']); bu.append(50000)
                 A.append(owns); bl.append(0); bu.append(tier['own'])
                 
-                # GPP Hard Rules
+                # GPP Hard Rules: Stars ($9400+) and Punts ($4400-)
                 A.append((self.clean_df['Sal'] >= 9400).astype(int).values); bl.append(tier['stars']); bu.append(4)
                 A.append((self.clean_df['Sal'] <= 4400).astype(int).values); bl.append(tier['pnt']); bu.append(3)
 
-                # 3. LEGAL DK SLOTTING CONSTRAINTS
+                # LEGAL DK SLOTTING CONSTRAINTS
                 for p in ['PG', 'SG', 'SF', 'PF', 'C']:
                     A.append(self.clean_df[f'mask_{p}'].values); bl.append(1); bu.append(8)
                 A.append(self.clean_df['mask_G'].values); bl.append(3); bu.append(8)
@@ -96,33 +101,34 @@ class EliteNBAGPPOptimizerV104:
             if len(portfolio) >= n_final: break
         return portfolio
 
-# --- UI ---
-st.title("🏆 VANTAGE 99 | NBA NUCLEAR ALPHA")
+# --- UI LAYER ---
+st.title("🏆 VANTAGE 99 | NBA NUCLEAR GENERATOR")
 f = st.file_uploader("LOAD DK SALARY CSV", type="csv")
 
 if f:
-    df_raw = pd.read_csv(f); engine = EliteNBAGPPOptimizerV104(df_raw)
-    inactives = st.multiselect("Injury Report (Mark OUT):", options=sorted(engine.clean_df['Name'].tolist()))
+    df_raw = pd.read_csv(f); engine = EliteNBAGPPOptimizerV105(df_raw)
+    inactives = st.multiselect("Mark Players ruled OUT (Injury Report):", options=sorted(engine.clean_df['Name'].tolist()))
     
-    if st.button("🚀 EXECUTE 10,000 SIMS"):
+    if st.button("🚀 EXECUTE 10,000 GPP SIMS"):
+        # Internal Real-Time Projection Generation
         engine.generate_realistic_projections(inactives)
-        with st.status("Crunching Real-Time Ceilings...", expanded=True) as status:
+        with st.status("Crunching 10,000 Outlier Nightmares...", expanded=True) as status:
             st.session_state.portfolio = engine.assemble(n_final=10, total_sims=10000)
             st.session_state.sel_idx = 0
-            if st.session_state.portfolio: status.update(label="10 Realistic Lineups Found!", state="complete")
+            if st.session_state.portfolio: status.update(label="10 Realistic Ceilings Optimized!", state="complete")
 
     if 'portfolio' in st.session_state and st.session_state.portfolio:
         col_list, col_scout = st.columns([1, 2.5])
         with col_list:
             for i, l in enumerate(st.session_state.portfolio):
-                # DISPLAY CEILING (Realistic 350-380 Range)
+                # DISPLAY CEILING: Realistic 350-380 Range
                 ceiling = round(l['GPP_Ceiling'].iloc[0], 1)
                 if st.button(f"L{i+1} | 🔥 {ceiling} GPP", key=f"btn_{i}"): st.session_state.sel_idx = i
 
         with col_scout:
             l = st.session_state.portfolio[st.session_state.sel_idx]
             
-            # 4. MOLECULAR ROSTER MAPPING (PG -> SG -> SF -> PF -> C -> G -> F -> UTIL)
+            # 3. MOLECULAR ROSTER MAPPING: Strictly Following DraftKings Order
             def pick_p(p_df, mask):
                 cands = p_df[p_df[mask] == 1].sort_values('Sal', ascending=False)
                 if not cands.empty:
@@ -130,12 +136,17 @@ if f:
                 return None, p_df
 
             final_roster, pool = [], l.copy()
+            # Core Slots (PG, SG, SF, PF, C)
             for pos in ['PG', 'SG', 'SF', 'PF', 'C']:
                 p, pool = pick_p(pool, f'mask_{pos}')
                 if p is not None: final_roster.append({"Pos": pos, "Name": p['Name'], "Team": p['Team'], "Sal": f"${int(p['Sal'])}", "Own": f"{p['Own']}%"})
+            
+            # Guard & Forward Flex (G, F)
             for flex in ['G', 'F']:
                 p, pool = pick_p(pool, f'mask_{flex}')
                 if p is not None: final_roster.append({"Pos": flex, "Name": p['Name'], "Team": p['Team'], "Sal": f"${int(p['Sal'])}", "Own": f"{p['Own']}%"})
+            
+            # Final Utility (UTIL)
             if not pool.empty:
                 u = pool.iloc[0]; final_roster.append({"Pos": "UTIL", "Name": u['Name'], "Team": u['Team'], "Sal": f"${int(u['Sal'])}", "Own": f"{u['Own']}%"})
             
