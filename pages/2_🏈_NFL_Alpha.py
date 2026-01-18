@@ -52,10 +52,11 @@ class EliteOptimizerV67:
         
         for i in range(n):
             # FIXED: Shape Mismatch Guard
+            # .flatten() ensures we are dealing with a 1D array of floats
             adj_p = (raw_p + (late_mask * 0.15) - (is_te * 0.85)).flatten()
             
-            # Use explicit size=adj_p.shape to prevent broadcasting errors
-            sim_p = np.random.normal(loc=adj_p, scale=adj_p * 0.22, size=adj_p.shape).clip(min=0)
+            # Explicitly align mean (loc) and std (scale) shapes
+            sim_p = np.random.normal(loc=adj_p, scale=np.abs(adj_p * 0.22), size=adj_p.shape).clip(min=0)
             
             A, bl, bu = [], [], []
             A.append(np.ones(n_p)); bl.append(9); bu.append(9) # 9 Players
@@ -68,19 +69,12 @@ class EliteOptimizerV67:
             A.append(self.df['is_TE'].values); bl.append(1); bu.append(1)
             A.append(self.df['is_DST'].values); bl.append(1); bu.append(1)
 
-            # QB Stacking Logic
-            for team in self.df['Team'].unique():
-                q_idx = self.df[(self.df['Team'] == team) & (self.df['is_QB'] == 1)].index.tolist()
-                s_idx = self.df[(self.df['Team'] == team) & ((self.df['is_WR'] == 1) | (self.df['is_TE'] == 1))].index.tolist()
-                if q_idx and s_idx:
-                    row = np.zeros(n_p); row[s_idx] = 1; row[q_idx] = -1
-                    A.append(row); bl.append(0); bu.append(8)
-
             # Exposure Governor
             for idx, name in enumerate(self.df['Name']):
                 if counts[name] >= (n * exp):
                     m = np.zeros(n_p); m[idx] = 1; A.append(m); bl.append(0); bu.append(0)
 
+            # Solve using MILP
             res = milp(c=-sim_p, constraints=LinearConstraint(np.vstack(A), bl, bu), 
                        integrality=np.ones(n_p), bounds=Bounds(0, 1))
             
@@ -111,13 +105,22 @@ if f:
 
         with col_scout:
             l = st.session_state.portfolio[st.session_state.sel_idx]
-            # Standard sorting logic
-            qb = l[l['is_QB']==1].iloc[0]; dst = l[l['is_DST']==1].iloc[0]; te = l[l['is_TE']==1].iloc[0]
+            # DraftKings Standard Sorting Logic
+            qb = l[l['is_QB']==1].iloc[0]
+            dst = l[l['is_DST']==1].iloc[0]
+            te = l[l['is_TE']==1].iloc[0]
             rbs = l[l['is_RB']==1].sort_values('Sal', ascending=False)
             wrs = l[l['is_WR']==1].sort_values('Sal', ascending=False)
-            core_ids = [qb['ID'], rbs.iloc[0]['ID'], rbs.iloc[1]['ID'], wrs.iloc[0]['ID'], wrs.iloc[1]['ID'], wrs.iloc[2]['ID'], te['ID'], dst['ID']]
-            flex = l[~l['ID'].isin(core_ids)].iloc[0]
             
-            display_order = [("QB", qb), ("RB", rbs.iloc[0]), ("RB", rbs.iloc[1]), ("WR", wrs.iloc[0]), ("WR", wrs.iloc[1]), ("WR", wrs.iloc[2]), ("TE", te), ("FLEX", flex), ("DST", dst)]
+            # Isolate FLEX
+            core_ids = [qb['ID'], rbs.iloc[0]['ID'], rbs.iloc[1]['ID'], wrs.iloc[0]['ID'], wrs.iloc[1]['ID'], wrs.iloc[2]['ID'], te['ID'], dst['ID']]
+            flex_row = l[~l['ID'].isin(core_ids)]
+            flex = flex_row.iloc[0] if not flex_row.empty else None
+            
+            display_order = [
+                ("QB", qb), ("RB", rbs.iloc[0]), ("RB", rbs.iloc[1]),
+                ("WR", wrs.iloc[0]), ("WR", wrs.iloc[1]), ("WR", wrs.iloc[2]),
+                ("TE", te), ("FLEX", flex), ("DST", dst)
+            ]
             
             st.table(pd.DataFrame([{"Pos": lbl, "Name": p['Name'], "Team": p['Team'], "Salary": f"${int(p['Sal'])}", "Proj": round(p['Proj'], 2)} for lbl, p in display_order]))
