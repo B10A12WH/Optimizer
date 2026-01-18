@@ -25,7 +25,6 @@ st.markdown("""
 
 class TacticalOptimizer:
     def __init__(self, df):
-        # Header Agnostic Mapping
         cols = {c.lower().replace(" ", ""): c for c in df.columns}
         self.df = df.copy()
         
@@ -33,7 +32,6 @@ class TacticalOptimizer:
         if not any(k in cols for k in ['projpts', 'proj', 'points']):
             avg_key = cols.get('avgpointspergame', df.columns[0])
             self.df['Proj'] = pd.to_numeric(df[avg_key], errors='coerce').fillna(2.0)
-            # Ceiling Jitter for Independence
             self.df['Proj'] *= np.random.uniform(1.05, 1.35, size=len(df))
         else:
             p_key = next(cols[k] for k in cols if k in ['projpts', 'proj', 'points'])
@@ -48,29 +46,28 @@ class TacticalOptimizer:
         for p in ['QB','RB','WR','TE','DST']: 
             self.df[f'is_{p}'] = (self.df['Pos'] == p).astype(int)
         
-        # 3. JAN 18 DIVISIONAL BLACKLIST
+        # 3. JAN 18 DIVISIONAL BLACKLIST (Nico Collins OUT)
         scrubbed = ['Nico Collins', 'Justin Watson']
         self.df = self.df[~self.df['Name'].isin(scrubbed)].reset_index(drop=True)
 
     def audit_lineup(self, lineup):
         reasons = []
-        qb = lineup[lineup['Pos'] == 'QB'].iloc[0]
-        stack = lineup[(lineup['Team'] == qb['Team']) & (lineup['Pos'].isin(['WR','TE']))]
-        
-        if len(stack) >= 2: reasons.append("🔥 TRIPLE THREAT: High-upside team stack.")
-        elif len(stack) == 1: reasons.append("🎯 CORE PAIR: Correlated QB/WR1 attack.")
+        qb_row = lineup[lineup['Pos'] == 'QB']
+        if not qb_row.empty:
+            qb = qb_row.iloc[0]
+            stack = lineup[(lineup['Team'] == qb['Team']) & (lineup['Pos'].isin(['WR','TE']))]
+            if len(stack) >= 2: reasons.append("🔥 TRIPLE THREAT: Heavy team correlation.")
+            elif len(stack) == 1: reasons.append("🎯 CORE PAIR: Standard QB/WR stack.")
         
         if lineup['Sal'].sum() >= 49800: reasons.append("💰 MAX CAP: Elite talent density.")
-        if lineup[lineup['Pos'] == 'RB']['Sal'].min() < 5000: reasons.append("💎 VALUE BACK: Low-cost RB utilization.")
-        
+        if lineup[lineup['Pos'] == 'RB']['Sal'].min() < 5000: reasons.append("💎 VALUE BACK: Strategic salary relief.")
         return " | ".join(reasons) if reasons else "Balanced Tournament Assembly"
 
     def assemble(self, n=10, exp=0.5, stack_req=1):
         n_p = len(self.df)
         projs_raw = self.df['Proj'].to_numpy(dtype=float)
         sals = self.df['Sal'].to_numpy(dtype=float)
-        portfolio = []
-        counts = {name: 0 for name in self.df['Name']}
+        portfolio, counts = [], {name: 0 for name in self.df['Name']}
         
         bar = st.progress(0)
         for i in range(n):
@@ -82,7 +79,6 @@ class TacticalOptimizer:
             for p, mn, mx in [('QB',1,1),('RB',2,3),('WR',3,4),('TE',1,2),('DST',1,1)]:
                 A.append(self.df[f'is_{p}'].values); bl.append(mn); bu.append(mx)
 
-            # Exposure Governor
             for idx, name in enumerate(self.df['Name']):
                 if counts[name] >= (n * exp):
                     m = np.zeros(n_p); m[idx] = 1; A.append(m); bl.append(0); bu.append(0)
@@ -98,7 +94,7 @@ class TacticalOptimizer:
 
 # --- COMMAND INTERFACE ---
 st.title("🧪 VANTAGE 99 | STRATEGIC COMMAND")
-st.markdown("`SYSTEM READY: DIVISIONAL ROUND JAN 18` | Houston@New England • LA Rams@Chicago")
+st.markdown("`SYSTEM READY: DIVISIONAL SUNDAY` | Texans@Patriots • Rams@Bears")
 
 with st.sidebar:
     st.header("⚙️ PORTFOLIO PARAMS")
@@ -111,29 +107,26 @@ f = st.file_uploader("UPLOAD DK SALARY DATA", type="csv")
 if f:
     df_raw = pd.read_csv(f)
     if "Field" in str(df_raw.columns): df_raw = pd.read_csv(f, skiprows=7)
-    
     engine = TacticalOptimizer(df_raw)
     
     if st.button("🚀 EXECUTE SCOUTING BATCH"):
         start = time.time()
         lineups = engine.assemble(n=batch, exp=exp_lim, stack_req=st_req)
         
-        # 📊 SLATE RADAR
         st.subheader("📡 SLATE RADAR")
         all_teams = [p['Team'] for l in lineups for _, p in l.iterrows()]
         team_exposure = pd.Series(all_teams).value_counts()
         cols = st.columns(min(len(team_exposure), 4))
         for i, (team, count) in enumerate(team_exposure.head(4).items()):
-            cols[i].metric(f"TARGET: {team}", f"{int((count/len(all_teams))*900)}%", "EXPOSURE")
+            cols[i].metric(f"TARGET: {team}", f"{int((count/len(all_teams))*100)}%", "EXPOSURE")
 
-        # 🌀 EXPOSURE HUD
+        st.markdown("### 🌀 EXPOSURE CIRCUIT")
         exp_df = pd.Series([n for l in lineups for n in l['Name'].tolist()]).value_counts().reset_index().head(12)
         exp_df.columns = ['Player', 'Count']
         fig = px.sunburst(exp_df, path=['Player'], values='Count', color='Count', color_continuous_scale='Darkmint', template="plotly_dark")
         fig.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=400)
         st.plotly_chart(fig, use_container_width=True)
 
-        # 🥇 SCOUTING REPORT GRID
         st.markdown("---")
         st.subheader("🥇 PRIMARY SCOUTING REPORTS")
         c1, c2 = st.columns(2)
@@ -150,4 +143,12 @@ if f:
                     st.markdown(f"""
                     <div class="player-row">
                         <span><span class="pos-label">{p['Pos']}</span> <b>{p['Name']}</b></span>
-                        <span style="color:#8b949
+                        <span style="color:#8b949e;">{p['Team']} • ${int(p['Sal'])}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                st.markdown(f"""
+                    <div class="audit-reasoning">
+                        <strong>💡 THE ANGLE:</strong> {engine.audit_lineup(l)}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
