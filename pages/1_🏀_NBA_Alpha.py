@@ -4,9 +4,9 @@ import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
 
 # --- ELITE NBA UI CONFIG ---
-st.set_page_config(page_title="VANTAGE 99 | v112.0 NBA", layout="wide", page_icon="🏀")
+st.set_page_config(page_title="VANTAGE 99 | v113.0 NBA", layout="wide", page_icon="🏀")
 
-class EliteNBAGPPOptimizerV112:
+class EliteNBAGPPOptimizerV113:
     def __init__(self, df):
         self.df = df.copy()
         raw_cols = {c.lower().replace(" ", "").replace("_", "").replace("%", ""): c for c in df.columns}
@@ -27,11 +27,11 @@ class EliteNBAGPPOptimizerV112:
         self.clean_df['Sal'] = hunt(['salary', 'sal', 'cost'], 50000)
         self.clean_df['Own'] = hunt(['ownership', 'own', 'projown', 'roster'], 15.0)
 
-        # 1. LEGAL DK POSITION MASKING (Including SF)
+        # 1. LEGAL DK POSITION MASKING (Now including SF)
         for p in ['PG', 'SG', 'SF', 'PF', 'C']:
             self.clean_df[f'mask_{p}'] = self.clean_df['Pos'].str.contains(p).astype(int)
         
-        # Flex eligibility
+        # Flex eligibility logic
         self.clean_df['mask_G'] = (self.clean_df['mask_PG'] | self.clean_df['mask_SG']).astype(int)
         self.clean_df['mask_F'] = (self.clean_df['mask_SF'] | self.clean_df['mask_PF']).astype(int)
         
@@ -53,7 +53,8 @@ class EliteNBAGPPOptimizerV112:
             'Murray, Kris', 'Thybulle, Matisse', 'Wesley, Blake', 'Ellis, Keon',
             'Murray, Keegan', 'Barrett, RJ', 'Poeltl, Jakob', 'Walter, Ja\'Kobe',
             'Reaves, Austin', 'Thiero, Adou', 'Suggs, Jalen', 'Wagner, Moritz',
-            'Haliburton, Tyrese', 'Toppin, Obi', 'George, Paul', 'Tatum, Jayson'
+            'Haliburton, Tyrese', 'Toppin, Obi', 'George, Paul', 'Tatum, Jayson',
+            'Vassell, Devin', 'Ingram, Harrison', 'Jones Garcia, David', 'Umude, Stanley'
         ]
         
         # Recalibrated Baseline: 5.2x baseline for realistic 260-point median
@@ -112,10 +113,10 @@ st.title("🏆 VANTAGE 99 | NBA LIVE AUTO-NUCLEAR")
 f = st.file_uploader("LOAD DK SALARY CSV", type="csv")
 
 if f:
-    df_raw = pd.read_csv(f); engine = EliteNBAGPPOptimizerV112(df_raw)
+    df_raw = pd.read_csv(f); engine = EliteNBAGPPOptimizerV113(df_raw)
     
     if st.button("🚀 EXECUTE 10,000 LIVE-AUDIT SIMS"):
-        engine.auto_injury_audit() # Automated update with Tari Eason and Cam Johnson OUT
+        engine.auto_injury_audit() # Automated update with Tamar Bates and Tari Eason OUT
         with st.status("Performing Live Injury Audit & Simulating...", expanded=True) as status:
             st.session_state.portfolio = engine.assemble(n_final=10, total_sims=10000)
             st.session_state.sel_idx = 0
