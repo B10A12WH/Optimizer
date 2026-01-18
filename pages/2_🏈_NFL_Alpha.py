@@ -2,110 +2,154 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
+import time
 
-# --- VANTAGE ZERO: NFL ELITE (STABLE V66.0) ---
-st.set_page_config(page_title="VANTAGE ZERO | NFL", layout="wide")
+# --- ELITE UI CONFIG ---
+st.set_page_config(page_title="VANTAGE 99 | v66.0", layout="wide", page_icon="🧬")
 
-st.title("🏈 VANTAGE ZERO | NFL")
-st.markdown("---")
+st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
+    .main { background-color: #0b0e14; color: #e0e0e0; }
+    .stButton>button { width: 100%; border-radius: 4px; border: 1px solid #30363d; background: #161b22; color: #c9d1d9; text-align: left; }
+    .stButton>button:hover { border-color: #00ffcc; color: #00ffcc; }
+    .audit-val { font-family: 'JetBrains Mono'; font-weight: bold; color: #00ffcc; font-size: 1.1rem; }
+    .late-swap-ready { border: 1px solid #00ffcc; color: #00ffcc; font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# 1. LIVE VEGAS & SLATE DATA
-# Houston@NE (3 PM), Rams@Chicago (6:30 PM)
-VEGAS_NFL = {
-    'HOU': {'ou': 40.5, 'spr': 3},   
-    'NE':  {'ou': 40.5, 'spr': -3},  
-    'LAR': {'ou': 48.5, 'spr': -3.5},
-    'CHI': {'ou': 48.5, 'spr': 3.5}  
-}
-LATE_GAME_TEAMS = ['LAR', 'CHI'] 
-LEAGUE_AVG_PPG = 21.5
-
-f = st.file_uploader("UPLOAD DK SALARY CSV", type="csv")
-
-if f:
-    try:
-        # DEEP HEADER SCAN: Fixes the 'Salary' KeyError by finding the real data start
-        df_raw = pd.read_csv(f)
-        header_idx = None
-        for i, row in df_raw.head(15).iterrows():
-            vals = [str(v).lower().strip() for v in row.values]
-            if 'name' in vals and 'salary' in vals:
-                header_idx = i
-                break
-        
-        if header_idx is not None:
-            df = df_raw.iloc[header_idx+1:].copy()
-            df.columns = [str(c).strip() for c in df_raw.iloc[header_idx].values]
-        else:
-            df = df_raw.copy()
-            df.columns = df.columns.str.strip()
-
-        df = df.reset_index(drop=True)
-        
-        # 2. DYNAMIC COLUMN MAPPING
+class EliteOptimizerV66:
+    def __init__(self, df):
+        # Header Normalization: Fixes 'Salary' or 'AvgPointsPerGame' KeyErrors
         cols = {c.lower().replace(" ", ""): c for c in df.columns}
-        sal_key = cols.get('salary', 'Salary')
-        proj_key = next((cols[k] for k in cols if k in ['proj', 'fppg', 'avgpointspergame']), df.columns[0])
+        self.df = df.copy()
         
-        df['Proj'] = pd.to_numeric(df[proj_key], errors='coerce').fillna(5.0)
-        df['Sal'] = pd.to_numeric(df[sal_key], errors='coerce').fillna(50000)
-        df['Team'] = df[cols.get('teamabbrev', 'TeamAbbrev')].astype(str)
+        # Hunt for the projection column
+        p_key = next((cols[k] for k in cols if k in ['proj', 'points', 'avgpointspergame']), df.columns[0])
         
-        # 3. VEGAS WEIGHTING & POSITIONING
-        def apply_vegas(row):
-            t = row['Team']
-            if t in VEGAS_NFL:
-                line = VEGAS_NFL[t]
-                implied = (line['ou']/2) - (line['spr']/2)
-                return row['Proj'] * (implied / LEAGUE_AVG_PPG)
-            return row['Proj']
+        self.df['Proj'] = pd.to_numeric(df[p_key], errors='coerce').fillna(0.0)
+        self.df['Sal'] = pd.to_numeric(df[cols.get('salary', 'Salary')]).fillna(50000)
+        self.df['Pos'] = df[cols.get('position', 'Position')].astype(str)
+        self.df['Team'] = df[cols.get('teamabbrev', 'TeamAbbrev')].astype(str)
+        self.df['ID'] = df[cols.get('id', 'ID')].astype(str)
         
-        df['Proj'] = df.apply(apply_vegas, axis=1)
-        df['is_late'] = df['Team'].isin(LATE_GAME_TEAMS).astype(int)
+        # 1/18 Vegas Boosts (Matchup Weighting)
+        vegas_boosts = {'HOU': 0.88, 'NE': 1.08, 'LAR': 1.15, 'CHI': 1.04}
+        self.df['Proj'] = self.df.apply(lambda x: x['Proj'] * vegas_boosts.get(x['Team'], 1.0), axis=1)
         
-        for p in ['QB','RB','WR','TE','DST']:
-            df[f'is_{p}'] = (df['Position'] == p).astype(int)
+        # Game Windows for Late Swap
+        self.df['is_late'] = self.df['Team'].isin(['LAR', 'CHI']).astype(int)
         
-        # Scrub confirmed OUTs
-        df = df[~df['Name'].isin(['Nico Collins', 'Justin Watson', 'Fred Warner'])]
-
-        if st.button("🚀 EXECUTE ALPHA SIMULATION"):
-            n_p = len(df)
-            projs = df['Proj'].values.astype(float)
-            sals = df['Sal'].values.astype(float)
+        for p in ['QB','RB','WR','TE','DST']: 
+            self.df[f'is_{p}'] = (self.df['Pos'] == p).astype(int)
             
-            # --- STRATEGIC FLEX TUNING ---
-            # 1. Penalize TEs in Flex: TEs rarely outscore WR/RBs in GPPs
-            # 2. Late Swap Bonus: Favor late-game players for the 9th spot
-            solver_projs = projs.copy()
-            solver_projs -= (df['is_TE'].values * 0.85)  # Discourage Flex-TE
-            solver_projs += (df['is_late'].values * 0.15) # Flex-Late Swap preference
+        # Inactive/Injury Scrub
+        self.df = self.df[~self.df['Name'].isin(['Nico Collins', 'Justin Watson'])].reset_index(drop=True)
+
+    def assemble(self, n=20, exp=0.45):
+        n_p = len(self.df)
+        raw_p = self.df['Proj'].values.astype(np.float64)
+        sals = self.df['Sal'].values.astype(np.float64)
+        late_mask = self.df['is_late'].values.astype(np.float64)
+        is_te = self.df['is_TE'].values
+        
+        portfolio, counts = [], {name: 0 for name in self.df['Name']}
+        
+        for i in range(n):
+            # Tournament Strategy: Penalty for TE in Flex + Late Swap Priority
+            adj_p = raw_p + (late_mask * 0.15) - (is_te * 0.85)
+            sim_p = np.random.normal(adj_p, adj_p * 0.22).clip(min=0)
             
             A, bl, bu = [], [], []
-            A.append(np.ones(n_p)); bl.append(9); bu.append(9)
-            A.append(sals); bl.append(49000); bu.append(50000)
+            A.append(np.ones(n_p)); bl.append(9); bu.append(9) # 9 Players
+            A.append(sals); bl.append(49000); bu.append(50000) # Salary Cap
             
-            # Position Requirements
-            A.append(df['is_QB'].values); bl.append(1); bu.append(1)
-            A.append(df['is_RB'].values); bl.append(2); bu.append(3)
-            A.append(df['is_WR'].values); bl.append(3); bu.append(4)
-            A.append(df['is_TE'].values); bl.append(1); bu.append(1) # FORCE 1 TE (NO FLEX TE)
-            A.append(df['is_DST'].values); bl.append(1); bu.append(1)
-            
-            # Solve
-            res = milp(c=-solver_projs, constraints=LinearConstraint(np.vstack(A), bl, bu), 
+            # Position Requirements (DraftKings Classic)
+            A.append(self.df['is_QB'].values); bl.append(1); bu.append(1)
+            A.append(self.df['is_RB'].values); bl.append(2); bu.append(3)
+            A.append(self.df['is_WR'].values); bl.append(3); bu.append(4)
+            A.append(self.df['is_TE'].values); bl.append(1); bu.append(1) # Forced TE limit
+            A.append(self.df['is_DST'].values); bl.append(1); bu.append(1)
+
+            # QB Stacking (Pair QB with at least 1 WR/TE)
+            for team in self.df['Team'].unique():
+                q_idx = self.df[(self.df['Team'] == team) & (self.df['is_QB'] == 1)].index.tolist()
+                s_idx = self.df[(self.df['Team'] == team) & ((self.df['is_WR'] == 1) | (self.df['is_TE'] == 1))].index.tolist()
+                if q_idx and s_idx:
+                    row = np.zeros(n_p)
+                    for s in s_idx: row[s] = 1
+                    for q in q_idx: row[q] = -1
+                    A.append(row); bl.append(0); bu.append(8)
+
+            # Exposure Control
+            for idx, name in enumerate(self.df['Name']):
+                if counts[name] >= (n * exp):
+                    m = np.zeros(n_p); m[idx] = 1; A.append(m); bl.append(0); bu.append(0)
+
+            res = milp(c=-sim_p, constraints=LinearConstraint(np.vstack(A), bl, bu), 
                        integrality=np.ones(n_p), bounds=Bounds(0, 1))
             
             if res.success:
-                lineup = df.iloc[np.where(res.x > 0.5)[0]]
-                st.subheader("🥇 ALPHA OPTIMAL")
-                
-                # Re-sort display for DK order (Putting latest player in FLEX)
-                lineup = lineup.sort_values(['Position', 'is_late'], ascending=[True, True])
-                st.table(lineup[['Position', 'Name', 'Team', 'Salary', 'Proj']])
-                st.info("FLEX Priority: Logic forces WR/RB into FLEX and favors late-start players for swap flexibility.")
-            else:
-                st.error("Solver failed. Adjust constraints.")
-                
-    except Exception as e:
-        st.error(f"Error: {e}")
+                idx = np.where(res.x > 0.5)[0]
+                lineup = self.df.iloc[idx].copy()
+                portfolio.append(lineup)
+                for name in lineup['Name']: counts[name] += 1
+        return portfolio
+
+# --- UI RENDERING ---
+st.title("🧬 VANTAGE 99 | v66.0 COMMAND")
+
+f = st.file_uploader("LOAD DK DATASET", type="csv")
+if f:
+    df_raw = pd.read_csv(f)
+    if "Field" in str(df_raw.columns): df_raw = pd.read_csv(f, skiprows=7)
+    engine = EliteOptimizerV66(df_raw)
+    
+    if 'portfolio' not in st.session_state:
+        if st.button("🚀 INITIATE ASSEMBLY"):
+            st.session_state.portfolio = engine.assemble(n=20)
+            st.session_state.sel_idx = 0
+
+    if 'portfolio' in st.session_state:
+        col_list, col_scout = st.columns([1, 2.2])
+
+        with col_list:
+            st.markdown("### 📋 PORTFOLIO INDEX")
+            for i, l in enumerate(st.session_state.portfolio):
+                if st.button(f"L{i+1} | {round(l['Proj'].sum(), 1)} PTS", key=f"btn_{i}"):
+                    st.session_state.sel_idx = i
+
+        with col_scout:
+            l = st.session_state.portfolio[st.session_state.sel_idx]
+            st.markdown(f"### 🔍 DRAFTKINGS STANDARD ROSTER: LINEUP #{st.session_state.sel_idx+1}")
+            
+            # Re-identifying players for standard sorting
+            qb = l[l['is_QB']==1].iloc[0]
+            rbs = l[l['is_RB']==1].sort_values('Sal', ascending=False)
+            wrs = l[l['is_WR']==1].sort_values('Sal', ascending=False)
+            te = l[l['is_TE']==1].iloc[0]
+            dst = l[l['is_DST']==1].iloc[0]
+
+            # FLEX Logic: Identifying the 9th man (3rd RB, 4th WR, or 2nd TE)
+            # This logic puts the player with the LATEST start time in FLEX for swap flexibility
+            core_ids = [qb['ID'], rbs.iloc[0]['ID'], rbs.iloc[1]['ID'], 
+                        wrs.iloc[0]['ID'], wrs.iloc[1]['ID'], wrs.iloc[2]['ID'], 
+                        te['ID'], dst['ID']]
+            flex_candidate = l[~l['ID'].isin(core_ids)]
+            flex = flex_candidate.iloc[0] if not flex_candidate.empty else None
+
+            # DRAFTKINGS ROSTER ORDER: QB, RB, RB, WR, WR, WR, TE, FLEX, DST
+            display_order = [
+                ("QB", qb), ("RB", rbs.iloc[0]), ("RB", rbs.iloc[1]),
+                ("WR", wrs.iloc[0]), ("WR", wrs.iloc[1]), ("WR", wrs.iloc[2]),
+                ("TE", te), ("FLEX", flex), ("DST", dst)
+            ]
+
+            # Visual Table Output
+            st.table(pd.DataFrame([
+                {"Pos": label, "Name": p['Name'], "Team": p['Team'], "Salary": f"${int(p['Sal'])}", "Proj": round(p['Proj'], 2)}
+                for label, p in display_order
+            ]))
+            
+            st.markdown(f"**Total Salary Used:** ${int(l['Sal'].sum())}")
+            st.markdown(f"**Late-Swap Ready Players:** {l['is_late'].sum()}")
