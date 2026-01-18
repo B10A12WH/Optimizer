@@ -108,3 +108,7 @@ if f:
     if st.button("🚀 EXECUTE ALPHA SIMULATION"):
         final_lineups = vz.run_engine()
         st.table(pd.DataFrame(final_lineups))
+        
+st.session_state.total_sims += sims
+st.session_state.sim_speed = round(sims / (end_time - start_time), 0)
+
