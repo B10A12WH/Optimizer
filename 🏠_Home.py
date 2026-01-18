@@ -6,7 +6,7 @@ from datetime import datetime
 # --- ELITE UI CONFIG ---
 st.set_page_config(page_title="VANTAGE ZERO | HQ", layout="wide", page_icon="🧬")
 
-# Initialize Global Memory
+# Initialize Global Memory for the Hub
 if 'total_sims' not in st.session_state: st.session_state.total_sims = 0
 if 'sim_speed' not in st.session_state: st.session_state.sim_speed = 0
 
@@ -15,8 +15,16 @@ st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
     .main { background-color: #05070a; color: #e0e6ed; font-family: 'JetBrains Mono', monospace; }
-    [data-testid="stMetric"] { background: rgba(16, 20, 26, 0.6); border: 1px solid rgba(0, 255, 204, 0.2); border-radius: 10px; padding: 15px; }
-    .terminal { background-color: #0d1117; border: 1px solid #00ffcc; padding: 15px; border-radius: 5px; font-size: 0.85rem; max-height: 250px; overflow-y: auto; }
+    [data-testid="stMetric"] { 
+        background: rgba(16, 20, 26, 0.6); 
+        border: 1px solid rgba(0, 255, 204, 0.2); 
+        border-radius: 10px; padding: 15px; 
+    }
+    .terminal { 
+        background-color: #0d1117; border: 1px solid #00ffcc; 
+        padding: 15px; border-radius: 5px; font-size: 0.85rem; 
+        max-height: 250px; overflow-y: auto; 
+    }
     .event-out { color: #ff4b4b; font-weight: bold; }
     .event-weather { color: #ffcc00; }
     </style>
@@ -25,9 +33,9 @@ st.markdown("""
 # --- LIVE INTEL FEED (JAN 18, 2026) ---
 def get_vantage_intel():
     return [
-        {"time": "11:05", "type": "out", "msg": "HOU: Nico Collins & Justin Watson - CONFIRMED OUT"},
+        {"time": "11:05", "type": "out", "msg": "HOU: Nico Collins & Justin Watson - CONFIRMED OUT (Concussion)"},
         {"time": "10:58", "type": "weather", "msg": "CHI: 18°F | 30MPH GUSTS | SNOW (Passing Game Danger)"},
-        {"time": "10:45", "type": "out", "msg": "NBA: Jokic (Knee) & Luka (Groin) - RULED OUT"},
+        {"time": "10:45", "type": "out", "msg": "NBA: Nikola Jokic (Knee) & Luka Doncic (Groin) - RULED OUT"},
         {"time": "09:30", "type": "news", "msg": "SYSTEM: High-Frequency Solver Online (14ms Latency)"}
     ]
 
@@ -71,6 +79,8 @@ st.markdown("---")
 # --- COMMAND MODULES ---
 c1, c2 = st.columns(2)
 with c1:
-    if st.button("LAUNCH NBA COMMAND"): st.switch_page("pages/1_🏀_NBA_Alpha.py")
+    st.info("🏀 **NBA COMMAND**")
+    if st.button("LAUNCH NBA ENGINE"): st.switch_page("pages/1_🏀_NBA_Alpha.py")
 with c2:
-    if st.button("LAUNCH NFL COMMAND"): st.switch_page("pages/2_🏈_NFL_Alpha.py")
+    st.info("🏈 **NFL COMMAND**")
+    if st.button("LAUNCH NFL ENGINE"): st.switch_page("pages/2_🏈_NFL_Alpha.py")
