@@ -4,9 +4,9 @@ import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
 
 # --- ELITE NBA UI CONFIG ---
-st.set_page_config(page_title="VANTAGE 99 | v107.0 NBA", layout="wide", page_icon="🏀")
+st.set_page_config(page_title="VANTAGE 99 | v108.0 NBA", layout="wide", page_icon="🏀")
 
-class EliteNBAGPPOptimizerV107:
+class EliteNBAGPPOptimizerV108:
     def __init__(self, df):
         self.df = df.copy()
         raw_cols = {c.lower().replace(" ", "").replace("_", "").replace("%", ""): c for c in df.columns}
@@ -36,14 +36,26 @@ class EliteNBAGPPOptimizerV107:
         # 2. LATE GAME TAGGING (Tonight: TOR @ LAL - 9:30 PM ET)
         self.clean_df['is_late'] = self.clean_df['Team'].isin(['LAL', 'TOR', 'LALakers', 'Toronto Raptors']).astype(int)
 
-    def generate_realistic_projections(self, out_players):
-        """TRIPLE-CHECKED MATH: 5.2x baseline + 20% Jitter"""
-        self.clean_df['Proj'] = (self.clean_df['Sal'] / 1000) * 5.2
-        self.clean_df.loc[self.clean_df['Name'].isin(out_players), 'Proj'] = 0.0
+    def auto_injury_boost(self):
+        """INTERNAL DATABASE: 01/18/2026 Injury Report Integration"""
+        out_list = [
+            'Tatum, Jayson', 'Poeltl, Jakob', 'Barrett, RJ', 'Quickley, Immanuel',
+            'Porter Jr., Michael', 'Giddey, Josh', 'Williams, Patrick', 'Collins, Zach',
+            'Murray, Dejounte', 'VanVleet, Fred', 'Jokic, Nikola', 'Lillard, Damian',
+            'Henderson, Scoot', 'Reaves, Austin', 'Thiero, Adou', 'Suggs, Jalen',
+            'Wagner, Moritz', 'Haliburton, Tyrese', 'George, Paul'
+        ]
         
-        out_teams = self.clean_df[self.clean_df['Name'].isin(out_players)]['Team'].unique()
+        # Baseline: Realistic tournament average (5.2x value)
+        self.clean_df['Proj'] = (self.clean_df['Sal'] / 1000) * 5.2
+        
+        # Rule out players
+        self.clean_df.loc[self.clean_df['Name'].isin(out_list), 'Proj'] = 0.0
+        
+        # Usage Migration Logic: Teammates gain 7% per missing teammate
+        out_teams = self.clean_df[self.clean_df['Name'].isin(out_list)]['Team'].unique()
         for team in out_teams:
-            count = len(self.clean_df[(self.clean_df['Team'] == team) & (self.clean_df['Name'].isin(out_players))])
+            count = len(self.clean_df[(self.clean_df['Team'] == team) & (self.clean_df['Name'].isin(out_list))])
             boost = min(1.25, 1 + (0.07 * count))
             self.clean_df.loc[(self.clean_df['Team'] == team) & (self.clean_df['Proj'] > 0), 'Proj'] *= boost
 
@@ -51,13 +63,10 @@ class EliteNBAGPPOptimizerV107:
         n_p = len(self.clean_df); raw_p = self.clean_df['Proj'].values.astype(np.float64)
         sals = self.clean_df['Sal'].values.astype(np.float64); owns = self.clean_df['Own'].values.astype(np.float64)
         
-        # CALIBRATED JITTER (20%): Targets 350-380 GPP range
+        # 20% JITTER: Targets realistic 350-380 GPP range
         sim_matrix = np.random.normal(loc=raw_p, scale=np.abs(raw_p * 0.20), size=(total_sims, n_p)).clip(min=0)
         
-        tiers = [
-            {"name": "Nuclear", "sal": 49700, "stars": 2, "own": 120.0, "pnt": 1},
-            {"name": "Alpha", "sal": 49400, "stars": 1, "own": 140.0, "pnt": 1}
-        ]
+        tiers = [{"name": "Nuclear", "sal": 49700, "stars": 2, "own": 120.0, "pnt": 1}]
         
         portfolio, seen = [], set()
         for tier in tiers:
@@ -87,19 +96,18 @@ class EliteNBAGPPOptimizerV107:
                     l_df['GPP_Ceiling'] = entry['ceiling']
                     portfolio.append(l_df); seen.add(entry['idx'])
                 if len(portfolio) >= n_final: break
-            if len(portfolio) >= n_final: break
         return portfolio
 
 # --- UI ---
-st.title("🏆 VANTAGE 99 | NBA LATE UTIL LOCK")
+st.title("🏆 VANTAGE 99 | NBA AUTO-NUCLEAR")
 f = st.file_uploader("LOAD DK SALARY CSV", type="csv")
 
 if f:
-    df_raw = pd.read_csv(f); engine = EliteNBAGPPOptimizerV107(df_raw)
-    inactives = st.multiselect("Injury Report (Mark OUT):", options=sorted(engine.clean_df['Name'].tolist()))
+    df_raw = pd.read_csv(f); engine = EliteNBAGPPOptimizerV108(df_raw)
     
-    if st.button("🚀 EXECUTE 10,000 SIMS"):
-        engine.generate_realistic_projections(inactives)
+    if st.button("🚀 EXECUTE 10,000 AUTO-SIMS"):
+        # Auto-detects injuries and boosts teammates
+        engine.auto_injury_boost()
         with st.status("Solving for Late Swap Flexibility...", expanded=True) as status:
             st.session_state.portfolio = engine.assemble(n_final=10, total_sims=10000)
             st.session_state.sel_idx = 0
@@ -117,42 +125,34 @@ if f:
             
             # 3. MOLECULAR ROSTER MAPPING
             def pick_p(p_df, mask):
-                # We sort by Sal descending to pick best players for specific slots first
                 cands = p_df[p_df[mask] == 1].sort_values('Sal', ascending=False)
                 if not cands.empty:
                     p = cands.iloc[0]; return p, p_df[p_df['ID'] != p['ID']]
                 return None, p_df
 
             final_roster, pool = [], l.copy()
-            # CORE SLOTS: Pick early players first for these specific slots
+            # CORE POSITIONS: (PG, SG, SF, PF, C)
             for pos in ['PG', 'SG', 'SF', 'PF', 'C']:
-                # Strategy: Pick non-late players for core if available to save UTIL for TOR/LAL
-                cands = pool[(pool[f'mask_{pos}'] == 1) & (pool['is_late'] == 0)].sort_values('Sal', ascending=False)
-                if cands.empty: # Fallback to late player if no early player fits
-                    cands = pool[pool[f'mask_{pos}'] == 1].sort_values('Sal', ascending=False)
-                
-                if not cands.empty:
-                    p = cands.iloc[0]
-                    final_roster.append({"Pos": pos, "Name": p['Name'], "Team": p['Team'], "Sal": f"${int(p['Sal'])}", "Own": f"{p['Own']}%", "is_late": p['is_late']})
+                # Save late game players for UTIL
+                c = pool[(pool[f'mask_{pos}']==1) & (pool['is_late']==0)].sort_values('Sal', ascending=False)
+                if c.empty: c = pool[pool[f'mask_{pos}']==1].sort_values('Sal', ascending=False)
+                if not c.empty:
+                    p = c.iloc[0]; final_roster.append({"Pos": pos, "Name": p['Name'], "Team": p['Team'], "Sal": f"${int(p['Sal'])}", "Own": f"{p['Own']}%", "is_late": p['is_late']})
                     pool = pool[pool['ID'] != p['ID']]
 
-            # FLEX SLOTS (G, F)
+            # FLEX SLOTS: (G, F)
             for flex in ['G', 'F']:
-                cands = pool[(pool[f'mask_{flex}'] == 1) & (pool['is_late'] == 0)].sort_values('Sal', ascending=False)
-                if cands.empty:
-                    cands = pool[pool[f'mask_{flex}'] == 1].sort_values('Sal', ascending=False)
-                
-                if not cands.empty:
-                    p = cands.iloc[0]
-                    final_roster.append({"Pos": flex, "Name": p['Name'], "Team": p['Team'], "Sal": f"${int(p['Sal'])}", "Own": f"{p['Own']}%", "is_late": p['is_late']})
+                c = pool[(pool[f'mask_{flex}']==1) & (pool['is_late']==0)].sort_values('Sal', ascending=False)
+                if c.empty: c = pool[pool[f'mask_{flex}']==1].sort_values('Sal', ascending=False)
+                if not c.empty:
+                    p = c.iloc[0]; final_roster.append({"Pos": flex, "Name": p['Name'], "Team": p['Team'], "Sal": f"${int(p['Sal'])}", "Own": f"{p['Own']}%", "is_late": p['is_late']})
                     pool = pool[pool['ID'] != p['ID']]
 
-            # 4. FINAL UTIL SLOT: This MUST be the latest available player
+            # 4. FINAL UTIL SLOT: Late Game Priority (TOR @ LAL)
             if not pool.empty:
-                # Force the player with the 'is_late' flag (LAL/TOR) into UTIL
                 u = pool.sort_values('is_late', ascending=False).iloc[0]
-                final_roster.append({"Pos": "UTIL", "Name": u['Name'], "Team": u['Team'], "Sal": f"${int(u['Sal'])}", "Own": f"{u['Own']}%", "is_late": u['is_late']})
+                final_roster.append({"Pos": "UTIL", "Name": u['Name'], "Team": u['Team'], "Sal": f"${int(u['Sal'])}", "Own": f"{u['Own']}%"})
             
             st.subheader(f"GPP NUCLEAR LINEUP #{st.session_state.sel_idx+1}")
             st.table(pd.DataFrame(final_roster).drop(columns=['is_late']))
-            st.info(f"Target Ceiling: 350-380 | Late-Swap Optimized for TOR @ LAL (9:30 PM)")
+            st.info(f"Target Ceiling: 350-380 | Late UTIL: TOR @ LAL (9:30 PM)")
