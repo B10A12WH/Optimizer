@@ -4,7 +4,7 @@ import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
 
 # --- ELITE UI CONFIG ---
-st.set_page_config(page_title="VANTAGE 99 | v72.0 GPP", layout="wide", page_icon="🏆")
+st.set_page_config(page_title="VANTAGE 99 | v73.0 GPP", layout="wide", page_icon="🏆")
 
 st.markdown("""
     <style>
@@ -12,33 +12,41 @@ st.markdown("""
     .main { background-color: #0b0e14; color: #e0e0e0; }
     .stButton>button { width: 100%; border-radius: 4px; border: 1px solid #30363d; background: #161b22; color: #c9d1d9; text-align: left; }
     .stButton>button:hover { border-color: #00ffcc; color: #00ffcc; }
-    .proj-val { color: #00ffcc; font-weight: bold; }
+    .proj-val { color: #00ffcc; font-weight: bold; font-size: 1.2rem; }
     </style>
     """, unsafe_allow_html=True)
 
-class EliteGPPOptimizerV72:
+class EliteGPPOptimizerV73:
     def __init__(self, df):
+        # 1. DYNAMIC HEADER DETECTION: Prevents Traceback errors
         cols = {c.lower().replace(" ", "").replace("%", ""): c for c in df.columns}
         self.df = df.copy()
         
+        # Hunt for columns even if names are slightly different
         p_key = next((cols[k] for k in cols if k in ['proj', 'fppg', 'points', 'avgpointspergame']), df.columns[0])
         sal_key = next((cols[k] for k in cols if k in ['salary', 'sal', 'cost']), 'Salary')
+        own_key = next((cols[k] for k in cols if k in ['ownership', 'own', 'projown', 'roster']), None)
         
         self.df['Proj'] = pd.to_numeric(df[p_key], errors='coerce').fillna(0.0)
         self.df['Sal'] = pd.to_numeric(df[sal_key], errors='coerce').fillna(50000)
         self.df['Pos'] = df[cols.get('position', 'Position')].astype(str)
         self.df['Team'] = df[cols.get('teamabbrev', 'TeamAbbrev')].astype(str)
         self.df['ID'] = df[cols.get('id', 'ID')].astype(str)
-        self.df['Own'] = pd.to_numeric(df.get('Ownership', 15.0), errors='coerce').fillna(15.0)
+        
+        # FIXED: Safe Ownership Assignment (The Traceback Fix)
+        if own_key and own_key in df.columns:
+            self.df['Own'] = pd.to_numeric(df[own_key], errors='coerce').fillna(15.0)
+        else:
+            self.df['Own'] = 15.0 # Fallback default for GPP logic
 
-        # Matchup Weighting (LAR @ CHI Shootout)
+        # Vegas Layer: Prioritizing the LAR@CHI shootout
         vegas_boosts = {'HOU': 0.88, 'NE': 1.08, 'LAR': 1.15, 'CHI': 1.04}
         self.df['Proj'] = self.df.apply(lambda x: x['Proj'] * vegas_boosts.get(x['Team'], 1.0), axis=1)
-        self.df['is_late'] = self.df['Team'].isin(['LAR', 'CHI']).astype(int)
         
         for p in ['QB','RB','WR','TE','DST']: self.df[f'is_{p}'] = (self.df['Pos'] == p).astype(int)
-        inactives = ['Nico Collins', 'Justin Watson', 'Mack Hollins', 'Nick McCloud']
-        self.df = self.df[~self.df['Name'].isin(inactives)].reset_index(drop=True)
+        
+        # Hard Scrub: Mack Hollins & Nico Collins are OUT
+        self.df = self.df[~self.df['Name'].isin(['Nico Collins', 'Justin Watson', 'Mack Hollins'])].reset_index(drop=True)
 
     def assemble(self, n=10, diversity=4):
         n_p = len(self.df)
@@ -47,27 +55,26 @@ class EliteGPPOptimizerV72:
         owns = self.df['Own'].values.astype(np.float64)
         
         portfolio, used_lineups = [], []
-        counts = {name: 0 for name in self.df['Name']}
 
         for i in range(n):
-            # 22% Jitter to simulate CEILING scenarios
+            # Simulation Jitter: 22% variance to find GPP ceilings
             sim_p = np.random.normal(loc=raw_p, scale=np.abs(raw_p * 0.22), size=raw_p.shape).clip(min=0)
             
             A, bl, bu = [], [], []
             A.append(np.ones(n_p)); bl.append(9); bu.append(9) 
             A.append(sals); bl.append(49200); bu.append(50000)
             
-            # GPP LEVERAGE: Ownership Cap
+            # GPP Leverage: Cap total ownership at 130%
             A.append(owns); bl.append(0); bu.append(130.0)
             
-            # Roster Structure
+            # Positional Hardcaps
             A.append(self.df['is_QB'].values); bl.append(1); bu.append(1)
             A.append(self.df['is_RB'].values); bl.append(2); bu.append(3)
             A.append(self.df['is_WR'].values); bl.append(3); bu.append(4)
             A.append(self.df['is_TE'].values); bl.append(1); bu.append(1)
             A.append(self.df['is_DST'].values); bl.append(1); bu.append(1)
 
-            # Diversity Control (Unique lineups)
+            # Unique Lineup Constraint (Forces diversity across your 10 entries)
             for past_idx in used_lineups:
                 row = np.zeros(n_p); row[list(past_idx)] = 1
                 A.append(row); bl.append(0); bu.append(diversity)
@@ -82,12 +89,12 @@ class EliteGPPOptimizerV72:
         return portfolio
 
 # --- MAIN RENDERING ---
-st.title("🏆 VANTAGE 99 | v72.0 GPP PORTFOLIO")
+st.title("🏆 VANTAGE 99 | v73.0 GPP PORTFOLIO")
 f = st.file_uploader("LOAD DK DATASET", type="csv")
 if f:
     df_raw = pd.read_csv(f)
     if "Field" in str(df_raw.columns): df_raw = pd.read_csv(f, skiprows=7)
-    engine = EliteGPPOptimizerV72(df_raw)
+    engine = EliteGPPOptimizerV73(df_raw)
     
     if st.button("🚀 INITIATE 10-LINEUP GPP ASSEMBLY"):
         st.session_state.portfolio = engine.assemble(n=10)
@@ -98,14 +105,13 @@ if f:
         with col_list:
             st.markdown("### 📋 PORTFOLIO INDEX")
             for i, l in enumerate(st.session_state.portfolio):
-                # RESTORED PROJECTED SCORE
                 score = round(l['Proj'].sum(), 1)
-                if st.button(f"L{i+1} | {score} PROJ PTS", key=f"btn_{i}"):
+                if st.button(f"L{i+1} | {score} PTS", key=f"btn_{i}"):
                     st.session_state.sel_idx = i
 
         with col_scout:
             l = st.session_state.portfolio[st.session_state.sel_idx]
-            # DK Sorting Logic
+            # Standard DK Sort
             qb = l[l['is_QB']==1].iloc[0]; dst = l[l['is_DST']==1].iloc[0]; te = l[l['is_TE']==1].iloc[0]
             rbs = l[l['is_RB']==1].sort_values('Sal', ascending=False)
             wrs = l[l['is_WR']==1].sort_values('Sal', ascending=False)
@@ -114,7 +120,7 @@ if f:
             
             display_order = [("QB", qb), ("RB", rbs.iloc[0]), ("RB", rbs.iloc[1]), ("WR", wrs.iloc[0]), ("WR", wrs.iloc[1]), ("WR", wrs.iloc[2]), ("TE", te), ("FLEX", flex), ("DST", dst)]
             
-            st.subheader(f"LINEUP #{st.session_state.sel_idx+1} SCOUTING")
+            st.subheader(f"LINEUP #{st.session_state.sel_idx+1} (CEILING TARGET)")
             st.table(pd.DataFrame([{"Pos": lbl, "Name": p['Name'], "Team": p['Team'], "Salary": f"${int(p['Sal'])}", "Proj": round(p['Proj'], 2)} for lbl, p in display_order]))
             st.markdown(f"**Total Projected Score:** <span class='proj-val'>{round(l['Proj'].sum(), 2)}</span>", unsafe_allow_html=True)
-            st.write(f"**Total Ownership:** {round(l['Own'].sum(), 1)}% | **GPP Diversity:** ACTIVE")
+            st.write(f"**Total Ownership:** {round(l['Own'].sum(), 1)}% | **GPP Leverage:** ACTIVE")
