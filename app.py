@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -22,14 +23,15 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# THE BLACKLIST (Jan 19, 2026)
-FORCED_OUT = ["Toppin", "Haliburton", "Mathurin", "Garland", "Brunson", "Kyrie", "Embiid", "Hartenstein", "Gafford", "Lively"]
+# IRON-CLAD INJURY BLACKLIST
+FORCED_OUT = ["Toppin", "Haliburton", "Mathurin", "Garland", "Brunson", "Kyrie", "Embiid", "Hartenstein", "Gafford"]
 
 @st.cache_data
 def process_data(file_bytes, manual_scratches_str):
     df = pd.read_csv(io.BytesIO(file_bytes))
     cols = {c.lower().replace(" ", ""): c for c in df.columns}
     
+    # Standardizing Columns (Using DK default headers)
     df['Proj'] = pd.to_numeric(df[cols.get('proj', df.columns[-1])], errors='coerce').fillna(0.0)
     df['Sal'] = pd.to_numeric(df[cols.get('salary', df.columns[5])], errors='coerce').fillna(50000)
     df['Name'] = df[cols.get('name', df.columns[2])].astype(str)
@@ -37,6 +39,7 @@ def process_data(file_bytes, manual_scratches_str):
     df['Team'] = df[cols.get('teamabbrev', df.columns[7])].astype(str)
     df['GameInfo'] = df[cols.get('gameinfo', df.columns[6])].astype(str)
 
+    # Hard Filtering Scratches
     manual_list = [s.strip().lower() for s in manual_scratches_str.split('\n') if s.strip()]
     full_scratch_list = [s.lower() for s in FORCED_OUT] + manual_list
     mask = df['Name'].str.lower().apply(lambda x: any(scratch in x for scratch in full_scratch_list))
@@ -51,9 +54,9 @@ class VantageOptimizer:
 
     def get_dk_slots(self, lineup_df):
         """
-        STRICT PRIORITY ENGINE:
-        Ensures all 8 DK slots are filled legally with no exceptions.
-        Order: PG, SG, SF, PF, C, G, F, UTIL
+        STRICT POSITION LOCK ENGINE (No Exceptions):
+        Forces 1 PG, 1 SG, 1 SF, 1 PF, 1 C, 1 G, 1 F, 1 UTIL.
+        Implements Late-Game UTIL logic.
         """
         def extract_time(info):
             try:
@@ -64,53 +67,62 @@ class VantageOptimizer:
 
         lineup_df['time_val'] = lineup_df['GameInfo'].apply(extract_time)
         assigned = {}
-        # Working pool of players for this specific lineup
         pool = lineup_df.to_dict('records')
 
-        # STEP 1: UTIL must be the latest possible game for swap flexibility
+        # 1. UTIL PRIORITY: Identify the absolute latest player for swap flexibility
         pool.sort(key=lambda x: x['time_val'], reverse=True)
-        assigned['UTIL'] = pool.pop(0)
+        # We don't pop yet, we just identify the best UTIL candidate (latest game)
+        util_candidate = pool[0] 
 
-        # STEP 2: Fill mandatory Primary Positions (PG, SG, SF, PF, C)
-        # We sort the remaining pool by projection to ensure the best fits go into specific slots
-        pool.sort(key=lambda x: x['Proj'], reverse=True)
-        
-        mandatory = ['PG', 'SG', 'SF', 'PF', 'C']
-        for slot in mandatory:
+        # 2. MANDATORY PRIMARY SLOTS (Satisfy the unique positions first)
+        for slot in ['PG', 'SG', 'SF', 'PF', 'C']:
+            pool.sort(key=lambda x: (slot not in x['Pos'], -x['Proj']))
             for i, p in enumerate(pool):
-                if slot in p['Pos']:
+                if slot in p['Pos'] and p['Name'] != util_candidate['Name']:
                     assigned[slot] = p
                     pool.pop(i)
                     break
-
-        # STEP 3: Fill Guard (G) and Forward (F) slots from the remaining 2 players
-        # G must be PG or SG. F must be SF or PF.
-        flex_slots = ['G', 'F']
-        for slot in flex_slots:
+        
+        # 3. FILL FLEX SLOTS (G, F)
+        # G can be PG/SG. F can be SF/PF.
+        for slot in ['G', 'F']:
+            pool.sort(key=lambda x: -x['Proj'])
             for i, p in enumerate(pool):
                 match = False
                 if slot == 'G' and ('PG' in p['Pos'] or 'SG' in p['Pos']): match = True
                 if slot == 'F' and ('SF' in p['Pos'] or 'PF' in p['Pos']): match = True
                 
-                if match:
+                if match and p['Name'] != util_candidate['Name']:
                     assigned[slot] = p
                     pool.pop(i)
                     break
+        
+        # 4. FINAL SLOT (UTIL)
+        # The remaining player MUST be the UTIL
+        if pool:
+            assigned['UTIL'] = pool[0]
 
-        # STEP 4: Final formatting for display in Entry Order
+        # RE-ORDER FOR DISPLAY
         ordered_list = []
-        dk_order = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
-        for slot in dk_order:
+        for slot in ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']:
             p = assigned.get(slot)
             if p:
                 p['Slot'] = slot
                 ordered_list.append(p)
-        
         return pd.DataFrame(ordered_list)
 
     def run_sims(self, n_sims=10000):
-        A = np.vstack([np.ones(self.n_p), self.df['Sal'].values])
-        constraints = LinearConstraint(A, [8, 45000], [8, 50000])
+        # Constraints: 8 players total, 1 of each primary position min.
+        A_rows = [np.ones(self.n_p), self.df['Sal'].values]
+        bl, bu = [8, 45000], [8, 50000]
+        
+        # Ensure at least 1 of each position exists in the solve
+        for pos in ['PG', 'SG', 'SF', 'PF', 'C']:
+            A_rows.append(self.df['Pos'].str.contains(pos).astype(int).values)
+            bl.append(1); bu.append(8)
+
+        A = np.vstack(A_rows)
+        constraints = LinearConstraint(A, bl, bu)
         
         lineup_counts = {}
         progress_bar = st.progress(0)
