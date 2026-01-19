@@ -146,8 +146,8 @@ if 'results' in st.session_state:
     cols = st.columns(2)
     for i, res in enumerate(st.session_state.results):
         win_pct = res['win_pct']
-        # Dynamic Confidence Logic: adjusted for 5k-10k scale
-        card_class = "card-high" if win_pct > 1.2 else "card-med" if win_pct > 0.4 else "card-low"
+       # Updated thresholds for 10,000 simulations
+card_class = "card-high" if win_pct > 0.8 else "card-med" if win_pct > 0.2 else "card-low"
         
         with cols[i % 2]:
             st.markdown(f"""
