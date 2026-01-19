@@ -110,7 +110,6 @@ class VantageOptimizer:
         success = solve(0, players)
         
         if success:
-            # Reconstruct DataFrame in strict display order
             ordered_data = []
             for slot in display_order:
                 p = assignment[slot]
@@ -118,12 +117,10 @@ class VantageOptimizer:
                 ordered_data.append(p)
             return pd.DataFrame(ordered_data)
         else:
-            # Fallback
             lineup_df['Slot'] = 'UTIL'
             return lineup_df
 
-    def run_sims(self, n_sims=5000):
-        # 1. FIXED SEED FOR RELIABILITY
+    def run_sims(self, n_sims=8000): # Increased to 8k for better granularity
         np.random.seed(42)
 
         # 2. IDENTIFY LATEST GAME (THE HAMMER)
@@ -141,7 +138,6 @@ class VantageOptimizer:
         is_hammer = (self.df['time_obj'] == latest_time).astype(int)
         
         # 3. CORRELATION PREP
-        # Map players to teams for correlated variance
         unique_teams = self.df['Team'].unique()
         team_map = {t: i for i, t in enumerate(unique_teams)}
         player_team_indices = self.df['Team'].map(team_map).values
@@ -182,9 +178,10 @@ class VantageOptimizer:
         progress_bar = st.progress(0)
         
         # --- GENERATE CORRELATED PROJECTIONS ---
-        # 15% Team Variance, 20% Player Variance
+        # Adjusted Variance: 15% Player (Was 20%), 15% Team
+        # This reduces scatter and makes "Sim Scores" significantly higher
         team_noise_matrix = np.random.normal(1.0, 0.15, (n_sims, n_teams))
-        player_noise_matrix = np.random.normal(1.0, 0.20, (n_sims, self.n_p))
+        player_noise_matrix = np.random.normal(1.0, 0.15, (n_sims, self.n_p))
         
         for i in range(n_sims):
             # Apply Correlation (60% Self, 40% Team)
@@ -198,7 +195,7 @@ class VantageOptimizer:
                 idx = tuple(sorted(np.where(res.x > 0.5)[0]))
                 lineup_counts[idx] = lineup_counts.get(idx, 0) + 1
             
-            if i % 500 == 0:
+            if i % 1000 == 0:
                 progress_bar.progress((i + 1) / n_sims)
         
         sorted_lineups = sorted(lineup_counts.items(), key=lambda x: x[1], reverse=True)[:20]
@@ -206,8 +203,7 @@ class VantageOptimizer:
         
         return [{
             'df': self.get_dk_slots(self.df.iloc[list(idx)]), 
-            'win_pct': (count/n_sims)*100, 
-            'rel_score': (count/max_freq)*100, 
+            'rel_score': int((count/max_freq)*100), # Normalized Score (0-100)
             'proj': self.df.iloc[list(idx)]['Proj'].sum(),
             'hammer_count': self.df.iloc[list(idx)]['time_obj'].apply(lambda t: t == latest_time).sum()
         } for idx, count in sorted_lineups]
@@ -227,7 +223,8 @@ if 'results' in st.session_state:
     cols = st.columns(2)
     for i, res in enumerate(st.session_state.results):
         score = res['rel_score']
-        card_class = "card-elite" if score > 85 else "card-strong" if score > 50 else "card-standard"
+        # Card Color Logic based on VANTAGE SCORE
+        card_class = "card-elite" if score >= 90 else "card-strong" if score >= 75 else "card-standard"
         
         # Construct Rows Strictly
         rows_html = ""
@@ -246,7 +243,7 @@ if 'results' in st.session_state:
                 <td class="proj">{proj}</td>
             </tr>"""
         
-        # Add Hammer Badge
+        # Badges
         hammer_badge = ""
         if res.get('hammer_count', 0) > 0:
             hammer_badge = '<span class="hammer-badge">🔨 HAMMER</span>'
@@ -259,7 +256,7 @@ if 'results' in st.session_state:
                         <span style="font-weight:bold; font-size:1.1em; color: white;">LINEUP #{i+1}</span>
                         {hammer_badge}
                     </div>
-                    <span class="badge">WIN: {round(res['win_pct'], 1)}%</span>
+                    <span class="badge">SCORE: {score}</span>
                 </div>
                 <table>
                     <thead>
