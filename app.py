@@ -67,6 +67,10 @@ class VantageOptimizer:
         self.n_p = len(df)
 
     def get_dk_slots(self, lineup_df):
+        """
+        ADVANCED DEPTH-FIRST SEARCH SLOTTING:
+        Ensures players are assigned to valid DK positions (PG, SG, SF, PF, C, G, F, UTIL).
+        """
         players = lineup_df.to_dict('records')
         slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
         
@@ -77,30 +81,26 @@ class VantageOptimizer:
             if s == 'F': return 'SF' in pos or 'PF' in pos
             return s in pos
 
-        memo = {}
-        def backtrack(slot_idx, used_mask):
-            state = (slot_idx, used_mask)
-            if state in memo: return memo[state]
-            if slot_idx == 8: return []
+        # We will try to fill the slots one by one using recursion
+        solution = [None] * 8
 
-            # Try to fill current slot with any available player
-            for p_idx, p in enumerate(players):
-                if not (used_mask & (1 << p_idx)) and fits(p, slots[slot_idx]):
-                    res = backtrack(slot_idx + 1, used_mask | (1 << p_idx))
-                    if res is not None:
-                        p_copy = p.copy()
-                        p_copy['Slot'] = slots[slot_idx]
-                        memo[state] = [p_copy] + res
-                        return memo[state]
+        def dfs(slot_idx, available_mask):
+            if slot_idx == 8:
+                return True
             
-            memo[state] = None
-            return None
+            for p_idx in range(8):
+                if not (available_mask & (1 << p_idx)):
+                    if fits(players[p_idx], slots[slot_idx]):
+                        solution[slot_idx] = players[p_idx].copy()
+                        solution[slot_idx]['Slot'] = slots[slot_idx]
+                        if dfs(slot_idx + 1, available_mask | (1 << p_idx)):
+                            return True
+            return False
 
-        assigned = backtrack(0, 0)
-        if assigned:
-            return pd.DataFrame(assigned)
+        if dfs(0, 0):
+            return pd.DataFrame(solution)
         
-        # Absolute fallback if backtracking fails
+        # Absolute Emergency Fallback
         lineup_df = lineup_df.copy()
         lineup_df['Slot'] = 'UTIL'
         return lineup_df
