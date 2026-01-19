@@ -5,12 +5,13 @@ from scipy.optimize import milp, LinearConstraint, Bounds
 import re
 import io
 
-# --- VANTAGE 99 ELITE PERFORMANCE CONFIG ---
-st.set_page_config(page_title="VANTAGE 99 | 5K SIM COMMAND", layout="wide", page_icon="⚡")
+# --- ELITE GLASS-MORPHIC UI CONFIG ---
+st.set_page_config(page_title="VANTAGE 99 | 10K COMMAND", layout="wide", page_icon="⚡")
 
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap');
+    
     .main { background: radial-gradient(circle at top right, #1a1f2e, #0d1117); color: #c9d1d9; font-family: 'Inter', sans-serif; }
     
     /* Dynamic Confidence Borders */
@@ -22,6 +23,8 @@ st.markdown("""
     .badge-label { padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: bold; color: white; margin-left: 5px; }
     .bg-win { background: #238636; }
     .bg-proj { background: #1f6feb; }
+    
+    .stTable { background: transparent !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -32,6 +35,7 @@ class VantageUnifiedOptimizer:
         self._clean_data()
 
     def _clean_data(self):
+        # Auto-detect headers from files like DKSalaries (2).csv 
         cols = {c.lower().replace(" ", ""): c for c in self.df.columns}
         self.df['Proj'] = pd.to_numeric(self.df[self._hunt(['proj', 'fppg', 'avgpoints'], cols)], errors='coerce').fillna(0.0)
         self.df['Sal'] = pd.to_numeric(self.df[self._hunt(['salary', 'cost'], cols)], errors='coerce').fillna(50000)
@@ -39,7 +43,8 @@ class VantageUnifiedOptimizer:
         self.df['Pos'] = self.df[self._hunt(['pos', 'position'], cols)].astype(str)
         self.df['Team'] = self.df[self._hunt(['team', 'tm', 'abb'], cols)].astype(str)
         self.df['Name'] = self.df[self._hunt(['name', 'player'], cols)].astype(str)
-        # STRICTURE: REMOVE PUNTS
+        
+        # Purely functional filter: remove anyone without a projection 
         self.df = self.df[self.df['Proj'] > 0.5].reset_index(drop=True)
 
     def _hunt(self, keys, col_map):
@@ -49,6 +54,7 @@ class VantageUnifiedOptimizer:
         return self.df.columns[0]
 
     def get_dk_slots(self, lineup_df):
+        """ Hard-Locked Positional Order (PG, SG, SF, PF, C, G, F, UTIL) """
         slots = ['QB', 'RB', 'RB', 'WR', 'WR', 'WR', 'TE', 'FLEX', 'DST'] if self.sport == "NFL" else \
                 ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
         assigned = []
@@ -73,35 +79,46 @@ class VantageUnifiedOptimizer:
         return pd.DataFrame(assigned)
 
     def run_alpha_sims(self, n_lineups=20, n_sims=5000, correlation=0.6, leverage=0.4):
+        """ HIGH PERFORMANCE: Vectorized Team-Based Simulations """
         n_p = len(self.df)
-        teams = self.df['Team'].unique()
+        
+        # Pre-map teams for vectorized math
+        team_list = self.df['Team'].values
+        unique_teams = list(set(team_list))
+        team_to_idx = {team: i for i, team in enumerate(unique_teams)}
+        team_indices = np.array([team_to_idx[t] for t in team_list])
+        
+        proj_base = self.df['Proj'].values
+        own_tax = (1 - (self.df['Own'].values * (leverage / 150)))
+        
         A = [np.ones(n_p), self.df['Sal'].values]
         bl, bu = [8 if self.sport=="NBA" else 9], [8 if self.sport=="NBA" else 9]
         bl.append(45000); bu.append(50000)
         
         lineup_counts = {}
         progress_bar = st.progress(0)
+        status_text = st.empty()
         
-        # Performance Tracking Loop
         for i in range(n_sims):
-            # 1. Team-Based Correlation (Fixes the "All Red" issue)
-            team_shift = {t: np.random.normal(1.0, 0.15 * correlation) for t in teams}
-            sim_p = np.array([
-                row['Proj'] * team_shift[row['Team']] * np.random.normal(1.0, 0.1) 
-                for _, row in self.df.iterrows()
-            ])
-            # 2. Leverage Tax
-            sim_p *= (1 - (self.df['Own'].values * (leverage / 150)))
+            # Vectorized Correlated Simulations
+            shifts = np.random.normal(1.0, 0.15 * correlation, len(unique_teams))
+            sim_p = proj_base * shifts[team_indices] * np.random.normal(1.0, 0.1, n_p)
+            sim_p *= own_tax
             
             res = milp(c=-sim_p, constraints=LinearConstraint(np.vstack(A), bl, bu), 
                        integrality=np.ones(n_p), bounds=Bounds(0, 1))
+            
             if res.success:
                 idx = tuple(sorted(np.where(res.x > 0.5)[0]))
                 lineup_counts[idx] = lineup_counts.get(idx, 0) + 1
             
-            if i % 100 == 0: progress_bar.progress((i + 1) / n_sims)
+            if i % 250 == 0:
+                progress_bar.progress((i + 1) / n_sims)
+                status_text.text(f"Processed {i}/{n_sims} simulations...")
 
+        status_text.empty()
         sorted_lineups = sorted(lineup_counts.items(), key=lambda x: x[1], reverse=True)[:n_lineups]
+        
         final_pool = []
         for idx, count in sorted_lineups:
             ldf = self.get_dk_slots(self.df.iloc[list(idx)])
@@ -112,34 +129,36 @@ class VantageUnifiedOptimizer:
             })
         return final_pool
 
-# --- UI ---
+# --- UI INTERFACE ---
 st.sidebar.title("🕹️ COMMAND")
+sport_mode = st.sidebar.radio("MODE", ["NBA", "NFL"])
 sim_count = st.sidebar.select_slider("SIMULATIONS", options=[1000, 3000, 5000, 10000], value=5000)
 corr_val = st.sidebar.slider("CORRELATION", 0.0, 1.0, 0.6)
 lev_val = st.sidebar.slider("LEVERAGE", 0.0, 1.0, 0.4)
-f = st.sidebar.file_uploader("SALARY CSV", type="csv")
+uploaded_file = st.sidebar.file_uploader("SALARY CSV", type="csv")
 
-if f:
-    engine = VantageUnifiedOptimizer(pd.read_csv(f), sport="NBA")
-    if st.button(f"⚡ RUN {sim_count} SIMULATIONS"):
-        results = engine.run_alpha_sims(n_sims=sim_count, correlation=corr_val, leverage=lev_val)
-        cols = st.columns(2)
-        for i, res in enumerate(results):
-            # Dynamic Visual Hierarchy Logic
-            win_pct = res['win_pct']
-            # Adjusted thresholds for higher sim counts
-            card_class = "card-high" if win_pct > 1.5 else "card-med" if win_pct > 0.4 else "card-low"
-            
-            with cols[i % 2]:
-                st.markdown(f"""
-                <div class="lineup-card {card_class}">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                        <span style="font-weight: bold; font-size: 16px;">LINEUP #{i+1}</span>
-                        <div>
-                            <span class="badge-label bg-win">WIN: {round(win_pct, 2)}%</span>
-                            <span class="badge-label bg-proj">PROJ: {round(res['proj'], 1)}</span>
-                        </div>
+if uploaded_file:
+    engine = VantageUnifiedOptimizer(pd.read_csv(uploaded_file), sport=sport_mode)
+    if st.button(f"⚡ RUN {sim_count} ALPHA SCRIPTS"):
+        st.session_state.results = engine.run_alpha_sims(n_sims=sim_count, correlation=corr_val, leverage=lev_val)
+        
+if 'results' in st.session_state:
+    cols = st.columns(2)
+    for i, res in enumerate(st.session_state.results):
+        win_pct = res['win_pct']
+        # Dynamic Confidence Logic: adjusted for 5k-10k scale
+        card_class = "card-high" if win_pct > 1.2 else "card-med" if win_pct > 0.4 else "card-low"
+        
+        with cols[i % 2]:
+            st.markdown(f"""
+            <div class="lineup-card {card_class}">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <span style="font-weight: bold; font-size: 16px;">LINEUP #{i+1}</span>
+                    <div>
+                        <span class="badge-label bg-win">WIN: {round(win_pct, 2)}%</span>
+                        <span class="badge-label bg-proj">PROJ: {round(res['proj'], 1)}</span>
                     </div>
                 </div>
-                """, unsafe_allow_html=True)
-                st.table(res['df'][['Slot', 'Name', 'Team', 'Sal', 'Proj']])
+            </div>
+            """, unsafe_allow_html=True)
+            st.table(res['df'][['Slot', 'Name', 'Team', 'Sal', 'Proj']])
