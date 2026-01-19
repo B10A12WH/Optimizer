@@ -9,7 +9,7 @@ import concurrent.futures
 import os
 
 # --- UI & THEME CONFIG ---
-st.set_page_config(page_title="VANTAGE 99 | GPP DIVERSIFIER", layout="wide", page_icon="🏀")
+st.set_page_config(page_title="VANTAGE 99 | CORRELATION KING", layout="wide", page_icon="🏀")
 
 st.markdown("""
     <style>
@@ -55,12 +55,8 @@ class VantageOptimizer:
         self.n_p = len(df)
 
     def get_dk_slots(self, lineup_df):
-        # Time-sorting players to reserve UTIL for latest starters
         players = lineup_df.sort_values('time_obj', ascending=False).to_dict('records')
-        
-        # Solving order: We MUST fill C and Primary spots first to avoid "All UTIL" error
-        specific_slots = ['C', 'PG', 'SG', 'SF', 'PF']
-        flex_slots = ['G', 'F', 'UTIL']
+        target_slots = ['UTIL', 'F', 'G', 'C', 'PF', 'SF', 'SG', 'PG']
         
         def fits(p, s):
             pos = p['Pos']
@@ -72,21 +68,18 @@ class VantageOptimizer:
         final_assignment = {}
         used_mask = 0
 
-        # Backtrack solver to find valid seating
-        def solve_seating(slot_list, current_idx, current_mask):
-            if current_idx == len(slot_list): return True
-            slot_name = slot_list[current_idx]
+        def solve_seating(current_slot_idx, current_mask):
+            if current_slot_idx == 8: return True
+            slot_name = target_slots[current_slot_idx]
             for i, p in enumerate(players):
                 if not (current_mask & (1 << i)) and fits(p, slot_name):
                     final_assignment[slot_name] = p.copy()
                     final_assignment[slot_name]['Slot'] = slot_name
-                    if solve_seating(slot_list, current_idx + 1, current_mask | (1 << i)):
+                    if solve_seating(current_slot_idx + 1, current_mask | (1 << i)):
                         return True
             return False
 
-        # Attempt to solve all 8 positions
-        all_target_slots = specific_slots + flex_slots
-        if solve_seating(all_target_slots, 0, 0):
+        if solve_seating(0, 0):
             display_order = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
             return pd.DataFrame([final_assignment[s] for s in display_order])
         return None
@@ -103,39 +96,55 @@ class VantageOptimizer:
         self.df['time_obj'] = self.df['GameInfo'].apply(parse_time)
         latest_time = self.df['time_obj'].max()
         is_hammer = (self.df['time_obj'] == latest_time).astype(int)
+        
+        # --- CORRELATION MAPPING ---
+        # Map each game/team for quick indexing in the sim loop
+        self.df['Game'] = self.df['GameInfo'].apply(lambda x: x.split(' ')[0])
+        
         vols = np.where(self.df['Sal'] < 4000, 0.25, np.where(self.df['Sal'] < 8000, 0.20, 0.15))
         self.df['Ceil'] = self.df['Proj'] + (self.df['Proj'] * vols * 2.33)
 
-        # Base Constraints - Fixed the 'bu' typo here
         A_base = [np.ones(self.n_p), self.df['Sal'].values]
         bl_base, bu_base = [8, 45000], [8, 50000]
         
         for p in ['PG', 'SG', 'SF', 'PF', 'C']:
             A_base.append(self.df['Pos'].str.contains(p).astype(int).values); bl_base.append(1); bu_base.append(8)
-        
         A_base.append(self.df['Pos'].apply(lambda x: 'PG' in x or 'SG' in x).astype(int).values); bl_base.append(3); bu_base.append(8)
         A_base.append(self.df['Pos'].apply(lambda x: 'SF' in x or 'PF' in x).astype(int).values); bl_base.append(3); bu_base.append(8)
         A_base.append(self.df['Pos'].apply(lambda x: 'C' in x and not ('SF' in x or 'PF' in x)).astype(int).values); bl_base.append(0); bu_base.append(2)
-        
         if is_hammer.sum() > 0: A_base.append(is_hammer.values); bl_base.append(1); bu_base.append(8)
 
         existing_lineups = []
         final_results = []
         progress = st.progress(0)
         
+        # Team indices for team-level noise
+        unique_teams = self.df['Team'].unique()
+        team_idx_map = {t: i for i, t in enumerate(unique_teams)}
+        player_team_indices = self.df['Team'].map(team_idx_map).values
+        
+        # Game indices for game-level shootout noise
+        unique_games = self.df['Game'].unique()
+        game_idx_map = {g: i for i, g in enumerate(unique_games)}
+        player_game_indices = self.df['Game'].map(game_idx_map).values
+
         for n in range(n_lineups):
-            A_run = list(A_base)
-            bl_run = list(bl_base)
-            bu_run = list(bu_base)
-            
+            A_run = list(A_base); bl_run = list(bl_base); bu_run = list(bu_base)
             for old_idx in existing_lineups:
                 row = np.zeros(self.n_p)
                 row[list(old_idx)] = 1
-                A_run.append(row)
-                bl_run.append(0)
-                bu_run.append(8 - min_uniques)
+                A_run.append(row); bl_run.append(0); bu_run.append(8 - min_uniques)
             
-            sim_p = self.df['Proj'].values * (1.0 + (np.random.normal(0, 1, self.n_p) * vols))
+            # --- CORRELATED SIMULATION ---
+            game_noise = np.random.normal(1.0, 0.08, len(unique_games)) # Shootout factor
+            team_noise = np.random.normal(1.0, 0.10, len(unique_teams)) # Team script
+            player_noise = np.random.normal(1.0, 0.12, self.n_p)        # Individual variance
+            
+            # Final noise = (Individual * 0.5) + (Team * 0.3) + (Game * 0.2)
+            # This ensures teammates move together and games "shoot out" together
+            combined_noise = (player_noise * 0.5) + (team_noise[player_team_indices] * 0.3) + (game_noise[player_game_indices] * 0.2)
+            sim_p = self.df['Proj'].values * combined_noise
+            
             res = milp(c=-sim_p, constraints=LinearConstraint(np.vstack(A_run), bl_run, bu_run), 
                        integrality=np.ones(self.n_p), bounds=Bounds(0, 1))
             
@@ -151,7 +160,6 @@ class VantageOptimizer:
                         'hammer_count': self.df.iloc[list(idx)]['time_obj'].apply(lambda t: t == latest_time).sum()
                     })
             progress.progress((n + 1) / n_lineups)
-            
         return final_results
 
 # --- UI FLOW ---
@@ -161,7 +169,7 @@ scratches = st.sidebar.text_area("🚑 ADD SCRATCHES", height=100)
 
 if f:
     data = process_data(f.getvalue(), scratches)
-    if st.button("🚀 GENERATE 10 GPP LINEUPS"):
+    if st.button("🚀 GENERATE CORRELATED GPP LINEUPS"):
         st.session_state.results = VantageOptimizer(data).run_gpp_sims(n_lineups=10, min_uniques=3)
 
 if 'results' in st.session_state:
@@ -169,4 +177,4 @@ if 'results' in st.session_state:
     for i, res in enumerate(st.session_state.results):
         rows = "".join([f"<tr><td class='pos'>{r['Slot']}</td><td><span class='name'>{r['Name']}</span> <span class='meta'>({r['Team']})</span></td><td class='sal'>${int(r['Sal'])}</td><td class='proj'>{round(r['Proj'],1)}</td><td class='ceil'>{round(r['Ceil'],1)}</td></tr>" for _, r in res['df'].iterrows()])
         with cols[i % 2]:
-            st.markdown(f"<div class='card-standard'><div style='display:flex; justify-content:space-between; margin-bottom:10px;'><div><b>GPP LINEUP #{i+1}</b>{' <span class=\"hammer-badge\">🔨 HAMMER</span>' if res['hammer_count']>0 else ''}</div><div><span class='badge' style='background:#d29922;'>CEIL: {round(res['ceil'],1)}</span></div></div><table><thead><tr><th>POS</th><th>PLAYER</th><th>SAL</th><th>PROJ</th><th>99%</th></tr></thead><tbody>{rows}</tbody></table></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='card-standard'><div style='display:flex; justify-content:space-between; margin-bottom:10px;'><div><b>CORRELATED GPP #{i+1}</b>{' <span class=\"hammer-badge\">🔨 HAMMER</span>' if res['hammer_count']>0 else ''}</div><div><span class='badge' style='background:#d29922;'>CEIL: {round(res['ceil'],1)}</span></div></div><table><thead><tr><th>POS</th><th>PLAYER</th><th>SAL</th><th>PROJ</th><th>99%</th></tr></thead><tbody>{rows}</tbody></table></div>", unsafe_allow_html=True)
