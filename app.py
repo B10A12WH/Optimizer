@@ -66,32 +66,20 @@ def process_data(file_bytes, manual_scratches_str):
     
     return df[df['Proj'] > 0.1].reset_index(drop=True)
 
-# --- WORKER FUNCTION (MUST BE TOP-LEVEL FOR PARALLELISM) ---
+# --- WORKER FUNCTION ---
 def solve_batch_task(args):
-    """
-    Solves a chunk of simulations on a separate CPU core.
-    """
     (indices, proj_matrix, A_matrix, bl, bu, n_p) = args
-    
-    # Reconstruct constraints inside the worker to avoid serialization issues
     constraints = LinearConstraint(A_matrix, bl, bu)
     bounds = Bounds(0, 1)
     integrality = np.ones(n_p)
-    
     batch_counts = {}
     
     for i, sim_idx in enumerate(indices):
-        # Grab the specific noise row for this sim
         sim_p = proj_matrix[i] 
-        
-        # Run Solver
         res = milp(c=-sim_p, constraints=constraints, integrality=integrality, bounds=bounds)
-        
         if res.success:
-            # Store result as tuple of indices
             lineup_idx = tuple(sorted(np.where(res.x > 0.5)[0]))
             batch_counts[lineup_idx] = batch_counts.get(lineup_idx, 0) + 1
-            
     return batch_counts
 
 class VantageOptimizer:
@@ -101,50 +89,83 @@ class VantageOptimizer:
 
     def get_dk_slots(self, lineup_df):
         """
-        SCARCITY SOLVER (Exact Display Order)
+        PLAYER-CENTRIC SOLVER:
+        Sorts players by 'Restrictiveness' (fewest eligible slots) and places them first.
+        This fixes the "Two Centers" bug where the solver paints itself into a corner.
         """
         lineup_df = lineup_df.copy()
         players = lineup_df.to_dict('records')
         
-        solve_order = ['C', 'PG', 'SG', 'SF', 'PF', 'G', 'F', 'UTIL']
-        display_order = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
+        # Valid Slots
+        all_slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
         
-        def fits(player, slot):
-            pos = player['Pos']
-            if slot == 'UTIL': return True
-            if slot == 'G': return ('PG' in pos or 'SG' in pos)
-            if slot == 'F': return ('SF' in pos or 'PF' in pos)
-            return slot in pos
-
-        assignment = {}
+        # Helper: Which slots can this player theoretically fill?
+        def get_valid_slots_for_player(p):
+            pos = p['Pos']
+            valid = []
+            if 'PG' in pos: valid.extend(['PG', 'G', 'UTIL'])
+            if 'SG' in pos: valid.extend(['SG', 'G', 'UTIL'])
+            if 'SF' in pos: valid.extend(['SF', 'F', 'UTIL'])
+            if 'PF' in pos: valid.extend(['PF', 'F', 'UTIL'])
+            if 'C' in pos: valid.extend(['C', 'UTIL'])
+            return sorted(list(set(valid))) # Dedup
+            
+        # 1. Sort players by how HARD they are to place (fewest options first)
+        # e.g. Pure Center (2 options: C, UTIL) goes before PG/SG (4 options)
+        for p in players:
+            p['valid_slots'] = get_valid_slots_for_player(p)
+            p['n_options'] = len(p['valid_slots'])
+            
+        players.sort(key=lambda x: x['n_options'])
         
-        def solve(order_idx, available_players):
-            if order_idx == 8: return True
-            slot_name = solve_order[order_idx]
-            for i, p in enumerate(available_players):
-                if fits(p, slot_name):
-                    assignment[slot_name] = p
-                    remaining = available_players[:i] + available_players[i+1:]
-                    if solve(order_idx + 1, remaining): return True
+        # 2. Recursive Placement
+        assignment = {} # Slot -> Player Name (or ID)
+        
+        def place_player(player_idx, open_slots):
+            if player_idx == len(players):
+                return True # All players placed successfully
+            
+            p = players[player_idx]
+            
+            # Try to put this player in any OPEN slot they qualify for
+            for slot in p['valid_slots']:
+                if slot in open_slots:
+                    # HEURISTIC: Does this player actually fit the slot definition?
+                    # (Double check mainly for G/F logic nuances)
+                    fits = False
+                    if slot == 'UTIL': fits = True
+                    elif slot == 'G': fits = ('PG' in p['Pos'] or 'SG' in p['Pos'])
+                    elif slot == 'F': fits = ('SF' in p['Pos'] or 'PF' in p['Pos'])
+                    else: fits = (slot in p['Pos'])
+                    
+                    if fits:
+                        # Place them
+                        p['Slot'] = slot
+                        new_open = open_slots.copy()
+                        new_open.remove(slot)
+                        
+                        # Recurse
+                        if place_player(player_idx + 1, new_open):
+                            return True
             return False
 
-        success = solve(0, players)
+        # Start with all slots open
+        initial_slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
+        success = place_player(0, initial_slots)
         
         if success:
-            ordered_data = []
-            for slot in display_order:
-                p = assignment[slot]
-                p['Slot'] = slot
-                ordered_data.append(p)
-            return pd.DataFrame(ordered_data)
+            # Sort output by standard DK order for display
+            display_map = {k: v for v, k in enumerate(all_slots)}
+            lineup_df['sort_val'] = lineup_df['Slot'].map(display_map)
+            return lineup_df.sort_values('sort_val').drop(['valid_slots', 'n_options', 'sort_val'], axis=1, errors='ignore')
         else:
+            # Fallback
             lineup_df['Slot'] = 'UTIL'
             return lineup_df
 
     def run_sims(self, n_sims=8000): 
         np.random.seed(42)
 
-        # 1. HAMMER TIME & METADATA
         def parse_time(info):
             try:
                 match = re.search(r'(\d{1,2}:\d{2}[APM]{2})', info)
@@ -161,7 +182,6 @@ class VantageOptimizer:
         player_team_indices = self.df['Team'].map(team_map).values
         n_teams = len(unique_teams)
         
-        # --- DYNAMIC VOLATILITY & CEILING ---
         volatility_arr = []
         for sal in self.df['Sal']:
             if sal < 4000: volatility_arr.append(0.25)
@@ -171,7 +191,6 @@ class VantageOptimizer:
         
         self.df['Ceil'] = self.df['Proj'] + (self.df['Proj'] * volatility_arr * 2.33)
 
-        # --- CONSTRAINT MATRIX CONSTRUCTION ---
         A_rows = [np.ones(self.n_p), self.df['Sal'].values]
         bl, bu = [8, 45000], [8, 50000]
         
@@ -197,55 +216,37 @@ class VantageOptimizer:
 
         A_matrix = np.vstack(A_rows)
         
-        # --- PRE-CALCULATE ALL NOISE (CENTRALIZED) ---
-        # This guarantees mathematical integrity is identical to single-core
         team_noise_matrix = np.random.normal(1.0, 0.15, (n_sims, n_teams))
         base_noise = np.random.normal(0, 1, (n_sims, self.n_p))
         player_noise_matrix = 1.0 + (base_noise * volatility_arr)
         
-        # Create the huge matrix of finalized projections for all 8000 sims
-        # (This is fast because it's vectorized numpy)
         all_sim_projections = np.zeros((n_sims, self.n_p))
         for i in range(n_sims):
             sim_team_noise = team_noise_matrix[i][player_team_indices]
             combined_noise = (player_noise_matrix[i] * 0.6) + (sim_team_noise * 0.4)
             all_sim_projections[i] = self.df['Proj'].values * combined_noise
 
-        # --- PARALLEL EXECUTION ---
-        # Detect cores and split workload
         n_workers = os.cpu_count() or 4
         chunk_size = n_sims // n_workers
-        
-        # Prepare batches
         tasks = []
         for i in range(n_workers):
             start = i * chunk_size
             end = start + chunk_size if i < n_workers - 1 else n_sims
-            
-            # Slice the projections for this batch
             batch_proj = all_sim_projections[start:end]
             batch_indices = range(start, end)
-            
-            # Pack arguments
             tasks.append((batch_indices, batch_proj, A_matrix, bl, bu, self.n_p))
             
         lineup_counts = {}
         progress_bar = st.progress(0)
         completed_sims = 0
         
-        # Execute in Parallel
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
-            # Map returns results in order
             for batch_result in executor.map(solve_batch_task, tasks):
-                # Aggregate results
                 for idx, count in batch_result.items():
                     lineup_counts[idx] = lineup_counts.get(idx, 0) + count
-                
-                # Update Progress
                 completed_sims += chunk_size
                 progress_bar.progress(min(completed_sims / n_sims, 1.0))
 
-        # Sort and Format
         sorted_lineups = sorted(lineup_counts.items(), key=lambda x: x[1], reverse=True)[:20]
         max_freq = sorted_lineups[0][1] if sorted_lineups else 1
         
