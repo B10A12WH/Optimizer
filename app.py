@@ -7,7 +7,7 @@ import io
 from datetime import datetime
 
 # --- UI & THEME CONFIG ---
-st.set_page_config(page_title="VANTAGE 99 | LEGAL LOCK", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="VANTAGE 99 | NBA OPTIMIZER", layout="wide", page_icon="🏀")
 
 st.markdown("""
     <style>
@@ -30,6 +30,7 @@ st.markdown("""
     
     /* BADGES */
     .badge { background: #238636; color: white; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: bold; }
+    .hammer-badge { background: #8250df; color: white; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: bold; margin-left: 5px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -69,18 +70,15 @@ class VantageOptimizer:
     def get_dk_slots(self, lineup_df):
         """
         SCARCITY SOLVER:
-        Fills the hardest positions (C, then Positions, then G/F) first.
-        This prevents the "All UTIL" error by ensuring flexible players 
-        aren't wasted on easy slots.
+        Fills the hardest positions (C) first to prevent invalid lineups.
         """
         lineup_df = lineup_df.copy()
         players = lineup_df.to_dict('records')
         
-        # We solve in this specific order to maximize success rate
-        # C is usually the hardest to fill if we have multiple.
+        # Solving Order (Hardest to Easiest)
         solve_order = ['C', 'PG', 'SG', 'SF', 'PF', 'G', 'F', 'UTIL']
         
-        # But we want to DISPLAY in this order
+        # Display Order (DraftKings Standard)
         display_order = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
         
         # Helper to check if player fits slot
@@ -92,7 +90,6 @@ class VantageOptimizer:
             return slot in pos
 
         # Recursive solver
-        # We map assignment by slot name for easier re-ordering later
         assignment = {}
         
         def solve(order_idx, available_players):
@@ -113,7 +110,7 @@ class VantageOptimizer:
         success = solve(0, players)
         
         if success:
-            # Reconstruct DataFrame in the strict display order
+            # Reconstruct DataFrame in strict display order
             ordered_data = []
             for slot in display_order:
                 p = assignment[slot]
@@ -121,12 +118,15 @@ class VantageOptimizer:
                 ordered_data.append(p)
             return pd.DataFrame(ordered_data)
         else:
-            # Fallback (Assign UTIL to prevent crash, but this implies MILP constraints failed)
+            # Fallback
             lineup_df['Slot'] = 'UTIL'
             return lineup_df
 
     def run_sims(self, n_sims=5000):
-        # 1. IDENTIFY LATEST GAME (THE HAMMER)
+        # 1. FIXED SEED FOR RELIABILITY
+        np.random.seed(42)
+
+        # 2. IDENTIFY LATEST GAME (THE HAMMER)
         def parse_time(info):
             try:
                 match = re.search(r'(\d{1,2}:\d{2}[APM]{2})', info)
@@ -140,33 +140,37 @@ class VantageOptimizer:
         latest_time = self.df['time_obj'].max()
         is_hammer = (self.df['time_obj'] == latest_time).astype(int)
         
+        # 3. CORRELATION PREP
+        # Map players to teams for correlated variance
+        unique_teams = self.df['Team'].unique()
+        team_map = {t: i for i, t in enumerate(unique_teams)}
+        player_team_indices = self.df['Team'].map(team_map).values
+        n_teams = len(unique_teams)
+        
         # --- MILP SETUP ---
         A_rows = [np.ones(self.n_p), self.df['Sal'].values]
         bl, bu = [8, 45000], [8, 50000]
         
-        # 1. Positional Constraints
+        # Positional Constraints
         for pos in ['PG', 'SG', 'SF', 'PF', 'C']:
             A_rows.append(self.df['Pos'].str.contains(pos).astype(int).values)
             bl.append(1); bu.append(8)
             
-        # 2. Flex Constraints (Crucial for valid lineups)
-        # Guard Eligible
+        # Flex Constraints
         is_guard = self.df['Pos'].apply(lambda x: 'PG' in x or 'SG' in x).astype(int)
         A_rows.append(is_guard.values)
-        bl.append(3); bu.append(8) # Min 3 Guards (PG, SG, G)
+        bl.append(3); bu.append(8)
 
-        # Forward Eligible
         is_forward = self.df['Pos'].apply(lambda x: 'SF' in x or 'PF' in x).astype(int)
         A_rows.append(is_forward.values)
-        bl.append(3); bu.append(8) # Min 3 Forwards (SF, PF, F)
+        bl.append(3); bu.append(8)
         
-        # 3. PURE CENTER LIMIT (The fix for "All UTIL")
-        # Players who are C but NOT F-eligible (can't play SF/PF) cannot exceed 2 (C + UTIL)
+        # Pure Center Limit (Prevents "All UTIL" bug)
         is_pure_center = self.df['Pos'].apply(lambda x: 'C' in x and not ('SF' in x or 'PF' in x)).astype(int)
         A_rows.append(is_pure_center.values)
-        bl.append(0); bu.append(2) # Max 2 pure centers
+        bl.append(0); bu.append(2)
         
-        # 4. HAMMER CONSTRAINT (Must have at least 1 player from latest game)
+        # Hammer Constraint
         if is_hammer.sum() > 0:
             A_rows.append(is_hammer.values)
             bl.append(1); bu.append(8)
@@ -177,8 +181,17 @@ class VantageOptimizer:
         lineup_counts = {}
         progress_bar = st.progress(0)
         
+        # --- GENERATE CORRELATED PROJECTIONS ---
+        # 15% Team Variance, 20% Player Variance
+        team_noise_matrix = np.random.normal(1.0, 0.15, (n_sims, n_teams))
+        player_noise_matrix = np.random.normal(1.0, 0.20, (n_sims, self.n_p))
+        
         for i in range(n_sims):
-            sim_p = self.df['Proj'].values * np.random.normal(1.0, 0.15, self.n_p)
+            # Apply Correlation (60% Self, 40% Team)
+            sim_team_noise = team_noise_matrix[i][player_team_indices]
+            combined_noise = (player_noise_matrix[i] * 0.6) + (sim_team_noise * 0.4)
+            sim_p = self.df['Proj'].values * combined_noise
+            
             res = milp(c=-sim_p, constraints=constraints, integrality=np.ones(self.n_p), bounds=Bounds(0, 1))
             
             if res.success:
@@ -233,10 +246,10 @@ if 'results' in st.session_state:
                 <td class="proj">{proj}</td>
             </tr>"""
         
-        # Add Hammer Badge if applicable
+        # Add Hammer Badge
         hammer_badge = ""
         if res.get('hammer_count', 0) > 0:
-            hammer_badge = '<span class="badge" style="background:#8250df; margin-left:5px;">🔨 HAMMER</span>'
+            hammer_badge = '<span class="hammer-badge">🔨 HAMMER</span>'
 
         with cols[i % 2]:
             st.markdown(f"""
