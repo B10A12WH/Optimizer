@@ -68,15 +68,20 @@ class VantageOptimizer:
 
     def get_dk_slots(self, lineup_df):
         """
-        BACKTRACKING SOLVER:
-        Strictly fits players into [PG, SG, SF, PF, C, G, F, UTIL].
-        Sorts the output exactly in that order.
+        SCARCITY SOLVER:
+        Fills the hardest positions (C, then Positions, then G/F) first.
+        This prevents the "All UTIL" error by ensuring flexible players 
+        aren't wasted on easy slots.
         """
         lineup_df = lineup_df.copy()
         players = lineup_df.to_dict('records')
         
-        # TARGET ORDER
-        slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
+        # We solve in this specific order to maximize success rate
+        # C is usually the hardest to fill if we have multiple.
+        solve_order = ['C', 'PG', 'SG', 'SF', 'PF', 'G', 'F', 'UTIL']
+        
+        # But we want to DISPLAY in this order
+        display_order = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
         
         # Helper to check if player fits slot
         def fits(player, slot):
@@ -87,40 +92,34 @@ class VantageOptimizer:
             return slot in pos
 
         # Recursive solver
-        assignment = [None] * 8
+        # We map assignment by slot name for easier re-ordering later
+        assignment = {}
         
-        # Optimization: Sort players by scarcity (number of slots they fit) to fail fast
-        # (This helps the recursion finish instantly)
-        
-        def solve(slot_idx, available_players):
-            if slot_idx == 8:
+        def solve(order_idx, available_players):
+            if order_idx == 8:
                 return True # All slots filled
             
-            slot_name = slots[slot_idx]
+            slot_name = solve_order[order_idx]
             
             # Try every available player for this slot
             for i, p in enumerate(available_players):
                 if fits(p, slot_name):
-                    assignment[slot_idx] = p
+                    assignment[slot_name] = p
                     remaining = available_players[:i] + available_players[i+1:]
-                    if solve(slot_idx + 1, remaining):
+                    if solve(order_idx + 1, remaining):
                         return True
             return False
 
         success = solve(0, players)
         
         if success:
-            for i, p in enumerate(assignment):
-                p['Slot'] = slots[i]
-            
-            res_df = pd.DataFrame(assignment)
-            
-            # STRICT SORT ENFORCEMENT
-            sort_map = {k: v for v, k in enumerate(slots)}
-            res_df['sort_val'] = res_df['Slot'].map(sort_map)
-            res_df = res_df.sort_values('sort_val').drop('sort_val', axis=1)
-            
-            return res_df
+            # Reconstruct DataFrame in the strict display order
+            ordered_data = []
+            for slot in display_order:
+                p = assignment[slot]
+                p['Slot'] = slot
+                ordered_data.append(p)
+            return pd.DataFrame(ordered_data)
         else:
             # Fallback (Assign UTIL to prevent crash, but this implies MILP constraints failed)
             lineup_df['Slot'] = 'UTIL'
@@ -128,10 +127,8 @@ class VantageOptimizer:
 
     def run_sims(self, n_sims=5000):
         # 1. IDENTIFY LATEST GAME (THE HAMMER)
-        # We parse the times to find the latest one
         def parse_time(info):
             try:
-                # Find time pattern like 10:00PM or 7:30PM
                 match = re.search(r'(\d{1,2}:\d{2}[APM]{2})', info)
                 if match:
                     return datetime.strptime(match.group(1), '%I:%M%p')
@@ -141,9 +138,6 @@ class VantageOptimizer:
 
         self.df['time_obj'] = self.df['GameInfo'].apply(parse_time)
         latest_time = self.df['time_obj'].max()
-        
-        # Create a mask for players in the latest game window
-        # We give a slight buffer or just match the exact max time
         is_hammer = (self.df['time_obj'] == latest_time).astype(int)
         
         # --- MILP SETUP ---
@@ -156,19 +150,26 @@ class VantageOptimizer:
             bl.append(1); bu.append(8)
             
         # 2. Flex Constraints (Crucial for valid lineups)
+        # Guard Eligible
         is_guard = self.df['Pos'].apply(lambda x: 'PG' in x or 'SG' in x).astype(int)
         A_rows.append(is_guard.values)
-        bl.append(3); bu.append(8)
+        bl.append(3); bu.append(8) # Min 3 Guards (PG, SG, G)
 
+        # Forward Eligible
         is_forward = self.df['Pos'].apply(lambda x: 'SF' in x or 'PF' in x).astype(int)
         A_rows.append(is_forward.values)
-        bl.append(3); bu.append(8)
+        bl.append(3); bu.append(8) # Min 3 Forwards (SF, PF, F)
         
-        # 3. HAMMER CONSTRAINT (Must have at least 1 player from latest game)
-        # Only apply if we actually found a time
+        # 3. PURE CENTER LIMIT (The fix for "All UTIL")
+        # Players who are C but NOT F-eligible (can't play SF/PF) cannot exceed 2 (C + UTIL)
+        is_pure_center = self.df['Pos'].apply(lambda x: 'C' in x and not ('SF' in x or 'PF' in x)).astype(int)
+        A_rows.append(is_pure_center.values)
+        bl.append(0); bu.append(2) # Max 2 pure centers
+        
+        # 4. HAMMER CONSTRAINT (Must have at least 1 player from latest game)
         if is_hammer.sum() > 0:
             A_rows.append(is_hammer.values)
-            bl.append(1); bu.append(8) # At least 1, max 8
+            bl.append(1); bu.append(8)
 
         A = np.vstack(A_rows)
         constraints = LinearConstraint(A, bl, bu)
@@ -217,7 +218,6 @@ if 'results' in st.session_state:
         
         # Construct Rows Strictly
         rows_html = ""
-        # The DF is already sorted by the get_dk_slots function now
         for _, row in res['df'].iterrows():
             slot = row.get('Slot', 'ERR')
             name = row.get('Name', 'Unknown')
