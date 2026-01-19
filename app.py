@@ -5,6 +5,8 @@ from scipy.optimize import milp, LinearConstraint, Bounds
 import re
 import io
 from datetime import datetime
+import concurrent.futures
+import os
 
 # --- UI & THEME CONFIG ---
 st.set_page_config(page_title="VANTAGE 99 | NBA OPTIMIZER", layout="wide", page_icon="🏀")
@@ -36,7 +38,6 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # IRON-CLAD INJURY BLACKLIST
-# ADDED KUMINGA HERE
 FORCED_OUT = ["Kuminga", "Toppin", "Haliburton", "Mathurin", "Garland", "Brunson", "Kyrie", "Embiid", "Hartenstein", "Gafford"]
 
 @st.cache_data
@@ -59,11 +60,39 @@ def process_data(file_bytes, manual_scratches_str):
     mask = df['Name'].str.lower().apply(lambda x: any(scratch in x for scratch in full_scratch_list))
     df = df[~mask]
     
-    # NUCLEAR FILTER: Specific hard-code to stop Kuminga and Toppin
+    # NUCLEAR FILTER
     df = df[~df['Name'].str.contains("Toppin", case=False)]
     df = df[~df['Name'].str.contains("Kuminga", case=False)]
     
     return df[df['Proj'] > 0.1].reset_index(drop=True)
+
+# --- WORKER FUNCTION (MUST BE TOP-LEVEL FOR PARALLELISM) ---
+def solve_batch_task(args):
+    """
+    Solves a chunk of simulations on a separate CPU core.
+    """
+    (indices, proj_matrix, A_matrix, bl, bu, n_p) = args
+    
+    # Reconstruct constraints inside the worker to avoid serialization issues
+    constraints = LinearConstraint(A_matrix, bl, bu)
+    bounds = Bounds(0, 1)
+    integrality = np.ones(n_p)
+    
+    batch_counts = {}
+    
+    for i, sim_idx in enumerate(indices):
+        # Grab the specific noise row for this sim
+        sim_p = proj_matrix[i] 
+        
+        # Run Solver
+        res = milp(c=-sim_p, constraints=constraints, integrality=integrality, bounds=bounds)
+        
+        if res.success:
+            # Store result as tuple of indices
+            lineup_idx = tuple(sorted(np.where(res.x > 0.5)[0]))
+            batch_counts[lineup_idx] = batch_counts.get(lineup_idx, 0) + 1
+            
+    return batch_counts
 
 class VantageOptimizer:
     def __init__(self, df):
@@ -72,13 +101,11 @@ class VantageOptimizer:
 
     def get_dk_slots(self, lineup_df):
         """
-        SCARCITY SOLVER:
-        Fills the hardest positions (C) first to prevent invalid lineups.
+        SCARCITY SOLVER (Exact Display Order)
         """
         lineup_df = lineup_df.copy()
         players = lineup_df.to_dict('records')
         
-        # Solving Order
         solve_order = ['C', 'PG', 'SG', 'SF', 'PF', 'G', 'F', 'UTIL']
         display_order = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
         
@@ -92,16 +119,13 @@ class VantageOptimizer:
         assignment = {}
         
         def solve(order_idx, available_players):
-            if order_idx == 8:
-                return True
-            
+            if order_idx == 8: return True
             slot_name = solve_order[order_idx]
             for i, p in enumerate(available_players):
                 if fits(p, slot_name):
                     assignment[slot_name] = p
                     remaining = available_players[:i] + available_players[i+1:]
-                    if solve(order_idx + 1, remaining):
-                        return True
+                    if solve(order_idx + 1, remaining): return True
             return False
 
         success = solve(0, players)
@@ -120,41 +144,34 @@ class VantageOptimizer:
     def run_sims(self, n_sims=8000): 
         np.random.seed(42)
 
-        # 1. HAMMER TIME
+        # 1. HAMMER TIME & METADATA
         def parse_time(info):
             try:
                 match = re.search(r'(\d{1,2}:\d{2}[APM]{2})', info)
-                if match:
-                    return datetime.strptime(match.group(1), '%I:%M%p')
-            except:
-                pass
+                if match: return datetime.strptime(match.group(1), '%I:%M%p')
+            except: pass
             return datetime.min
 
         self.df['time_obj'] = self.df['GameInfo'].apply(parse_time)
         latest_time = self.df['time_obj'].max()
         is_hammer = (self.df['time_obj'] == latest_time).astype(int)
         
-        # 2. CORRELATION & RISK MAPPING
         unique_teams = self.df['Team'].unique()
         team_map = {t: i for i, t in enumerate(unique_teams)}
         player_team_indices = self.df['Team'].map(team_map).values
         n_teams = len(unique_teams)
         
-        # --- DYNAMIC VOLATILITY (THE PUNT FILTER) ---
+        # --- DYNAMIC VOLATILITY & CEILING ---
         volatility_arr = []
         for sal in self.df['Sal']:
-            if sal < 4000:
-                volatility_arr.append(0.25) # Risky Punts (Harder to hit optimal)
-            elif sal < 8000:
-                volatility_arr.append(0.20) # Mid Range
-            else:
-                volatility_arr.append(0.15) # Stars (Consistent)
+            if sal < 4000: volatility_arr.append(0.25)
+            elif sal < 8000: volatility_arr.append(0.20)
+            else: volatility_arr.append(0.15)
         volatility_arr = np.array(volatility_arr)
         
-        # CALCULATE 99th PERCENTILE (CEILING) for Display
         self.df['Ceil'] = self.df['Proj'] + (self.df['Proj'] * volatility_arr * 2.33)
 
-        # --- MILP SETUP ---
+        # --- CONSTRAINT MATRIX CONSTRUCTION ---
         A_rows = [np.ones(self.n_p), self.df['Sal'].values]
         bl, bu = [8, 45000], [8, 50000]
         
@@ -162,7 +179,6 @@ class VantageOptimizer:
             A_rows.append(self.df['Pos'].str.contains(pos).astype(int).values)
             bl.append(1); bu.append(8)
             
-        # Flex Constraints
         is_guard = self.df['Pos'].apply(lambda x: 'PG' in x or 'SG' in x).astype(int)
         A_rows.append(is_guard.values)
         bl.append(3); bu.append(8)
@@ -171,43 +187,65 @@ class VantageOptimizer:
         A_rows.append(is_forward.values)
         bl.append(3); bu.append(8)
         
-        # Pure Center Limit
         is_pure_center = self.df['Pos'].apply(lambda x: 'C' in x and not ('SF' in x or 'PF' in x)).astype(int)
         A_rows.append(is_pure_center.values)
         bl.append(0); bu.append(2)
         
-        # Hammer Constraint
         if is_hammer.sum() > 0:
             A_rows.append(is_hammer.values)
             bl.append(1); bu.append(8)
 
-        A = np.vstack(A_rows)
-        constraints = LinearConstraint(A, bl, bu)
+        A_matrix = np.vstack(A_rows)
         
-        lineup_counts = {}
-        progress_bar = st.progress(0)
-        
-        # --- GENERATE SIMS ---
+        # --- PRE-CALCULATE ALL NOISE (CENTRALIZED) ---
+        # This guarantees mathematical integrity is identical to single-core
         team_noise_matrix = np.random.normal(1.0, 0.15, (n_sims, n_teams))
         base_noise = np.random.normal(0, 1, (n_sims, self.n_p))
         player_noise_matrix = 1.0 + (base_noise * volatility_arr)
         
+        # Create the huge matrix of finalized projections for all 8000 sims
+        # (This is fast because it's vectorized numpy)
+        all_sim_projections = np.zeros((n_sims, self.n_p))
         for i in range(n_sims):
-            # Combined Correlation
             sim_team_noise = team_noise_matrix[i][player_team_indices]
             combined_noise = (player_noise_matrix[i] * 0.6) + (sim_team_noise * 0.4)
-            
-            sim_p = self.df['Proj'].values * combined_noise
-            
-            res = milp(c=-sim_p, constraints=constraints, integrality=np.ones(self.n_p), bounds=Bounds(0, 1))
-            
-            if res.success:
-                idx = tuple(sorted(np.where(res.x > 0.5)[0]))
-                lineup_counts[idx] = lineup_counts.get(idx, 0) + 1
-            
-            if i % 1000 == 0:
-                progress_bar.progress((i + 1) / n_sims)
+            all_sim_projections[i] = self.df['Proj'].values * combined_noise
+
+        # --- PARALLEL EXECUTION ---
+        # Detect cores and split workload
+        n_workers = os.cpu_count() or 4
+        chunk_size = n_sims // n_workers
         
+        # Prepare batches
+        tasks = []
+        for i in range(n_workers):
+            start = i * chunk_size
+            end = start + chunk_size if i < n_workers - 1 else n_sims
+            
+            # Slice the projections for this batch
+            batch_proj = all_sim_projections[start:end]
+            batch_indices = range(start, end)
+            
+            # Pack arguments
+            tasks.append((batch_indices, batch_proj, A_matrix, bl, bu, self.n_p))
+            
+        lineup_counts = {}
+        progress_bar = st.progress(0)
+        completed_sims = 0
+        
+        # Execute in Parallel
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
+            # Map returns results in order
+            for batch_result in executor.map(solve_batch_task, tasks):
+                # Aggregate results
+                for idx, count in batch_result.items():
+                    lineup_counts[idx] = lineup_counts.get(idx, 0) + count
+                
+                # Update Progress
+                completed_sims += chunk_size
+                progress_bar.progress(min(completed_sims / n_sims, 1.0))
+
+        # Sort and Format
         sorted_lineups = sorted(lineup_counts.items(), key=lambda x: x[1], reverse=True)[:20]
         max_freq = sorted_lineups[0][1] if sorted_lineups else 1
         
@@ -226,7 +264,7 @@ scratches_input = st.sidebar.text_area("🚑 ADD SCRATCHES", height=100)
 
 if f:
     data = process_data(f.getvalue(), scratches_input)
-    if st.button("🚀 GENERATE SIMS"):
+    if st.button("🚀 GENERATE SIMS (MULTI-CORE)"):
         optimizer = VantageOptimizer(data)
         st.session_state.results = optimizer.run_sims()
 
@@ -236,7 +274,6 @@ if 'results' in st.session_state:
         score = res['rel_score']
         card_class = "card-elite" if score >= 90 else "card-strong" if score >= 75 else "card-standard"
         
-        # Construct Rows Strictly
         rows_html = ""
         for _, row in res['df'].iterrows():
             slot = row.get('Slot', 'ERR')
@@ -255,7 +292,6 @@ if 'results' in st.session_state:
                 <td class="ceil">{ceil}</td>
             </tr>"""
         
-        # Badges
         hammer_badge = ""
         if res.get('hammer_count', 0) > 0:
             hammer_badge = '<span class="hammer-badge">🔨 HAMMER</span>'
