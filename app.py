@@ -20,13 +20,14 @@ st.markdown("""
     
     /* TABLE STYLES */
     table { width: 100%; border-collapse: collapse; }
-    th { text-align: left; color: #8b949e; font-size: 12px; border-bottom: 1px solid #30363d; padding-bottom: 5px; }
+    th { text-align: left; color: #8b949e; font-size: 12px; border-bottom: 1px solid #30363d; padding-bottom: 5px; text-transform: uppercase; }
     td { padding: 8px 0; border-bottom: 1px solid #21262d; font-size: 14px; }
     .pos { color: #58a6ff; font-weight: bold; width: 50px; }
     .name { color: #e6edf3; font-weight: 600; }
     .meta { color: #8b949e; font-size: 12px; }
     .sal { color: #7ee787; font-family: monospace; text-align: right; }
     .proj { color: #c9d1d9; font-weight: bold; text-align: right; }
+    .ceil { color: #d29922; font-weight: bold; text-align: right; font-family: monospace; }
     
     /* BADGES */
     .badge { background: #238636; color: white; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: bold; }
@@ -75,13 +76,10 @@ class VantageOptimizer:
         lineup_df = lineup_df.copy()
         players = lineup_df.to_dict('records')
         
-        # Solving Order (Hardest to Easiest)
+        # Solving Order
         solve_order = ['C', 'PG', 'SG', 'SF', 'PF', 'G', 'F', 'UTIL']
-        
-        # Display Order (DraftKings Standard)
         display_order = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
         
-        # Helper to check if player fits slot
         def fits(player, slot):
             pos = player['Pos']
             if slot == 'UTIL': return True
@@ -89,16 +87,13 @@ class VantageOptimizer:
             if slot == 'F': return ('SF' in pos or 'PF' in pos)
             return slot in pos
 
-        # Recursive solver
         assignment = {}
         
         def solve(order_idx, available_players):
             if order_idx == 8:
-                return True # All slots filled
+                return True
             
             slot_name = solve_order[order_idx]
-            
-            # Try every available player for this slot
             for i, p in enumerate(available_players):
                 if fits(p, slot_name):
                     assignment[slot_name] = p
@@ -120,10 +115,10 @@ class VantageOptimizer:
             lineup_df['Slot'] = 'UTIL'
             return lineup_df
 
-    def run_sims(self, n_sims=8000): # Increased to 8k for better granularity
+    def run_sims(self, n_sims=8000): 
         np.random.seed(42)
 
-        # 2. IDENTIFY LATEST GAME (THE HAMMER)
+        # 1. HAMMER TIME
         def parse_time(info):
             try:
                 match = re.search(r'(\d{1,2}:\d{2}[APM]{2})', info)
@@ -137,17 +132,35 @@ class VantageOptimizer:
         latest_time = self.df['time_obj'].max()
         is_hammer = (self.df['time_obj'] == latest_time).astype(int)
         
-        # 3. CORRELATION PREP
+        # 2. CORRELATION & RISK MAPPING
         unique_teams = self.df['Team'].unique()
         team_map = {t: i for i, t in enumerate(unique_teams)}
         player_team_indices = self.df['Team'].map(team_map).values
         n_teams = len(unique_teams)
         
+        # --- DYNAMIC VOLATILITY (THE PUNT FILTER) ---
+        # We assign different risk levels based on salary.
+        # Cheap players (<$4k) get HIGH volatility (0.25).
+        # Expensive players (>$8k) get LOW volatility (0.15).
+        
+        volatility_arr = []
+        for sal in self.df['Sal']:
+            if sal < 4000:
+                volatility_arr.append(0.25) # Risky Punts (Harder to hit optimal)
+            elif sal < 8000:
+                volatility_arr.append(0.20) # Mid Range
+            else:
+                volatility_arr.append(0.15) # Stars (Consistent)
+        volatility_arr = np.array(volatility_arr)
+        
+        # CALCULATE 99th PERCENTILE (CEILING) for Display
+        # Ceiling = Proj + (Proj * Volatility * 2.33) -> 99th percentile of Normal dist.
+        self.df['Ceil'] = self.df['Proj'] + (self.df['Proj'] * volatility_arr * 2.33)
+
         # --- MILP SETUP ---
         A_rows = [np.ones(self.n_p), self.df['Sal'].values]
         bl, bu = [8, 45000], [8, 50000]
         
-        # Positional Constraints
         for pos in ['PG', 'SG', 'SF', 'PF', 'C']:
             A_rows.append(self.df['Pos'].str.contains(pos).astype(int).values)
             bl.append(1); bu.append(8)
@@ -161,7 +174,7 @@ class VantageOptimizer:
         A_rows.append(is_forward.values)
         bl.append(3); bu.append(8)
         
-        # Pure Center Limit (Prevents "All UTIL" bug)
+        # Pure Center Limit
         is_pure_center = self.df['Pos'].apply(lambda x: 'C' in x and not ('SF' in x or 'PF' in x)).astype(int)
         A_rows.append(is_pure_center.values)
         bl.append(0); bu.append(2)
@@ -177,16 +190,21 @@ class VantageOptimizer:
         lineup_counts = {}
         progress_bar = st.progress(0)
         
-        # --- GENERATE CORRELATED PROJECTIONS ---
-        # Adjusted Variance: 15% Player (Was 20%), 15% Team
-        # This reduces scatter and makes "Sim Scores" significantly higher
+        # --- GENERATE SIMS ---
+        # 1. Team Environment Noise (15% Variance)
         team_noise_matrix = np.random.normal(1.0, 0.15, (n_sims, n_teams))
-        player_noise_matrix = np.random.normal(1.0, 0.15, (n_sims, self.n_p))
+        
+        # 2. Player Individual Noise (Using Dynamic Volatility)
+        # We create a matrix of random normals (mean=0, std=1) then scale by specific volatility
+        base_noise = np.random.normal(0, 1, (n_sims, self.n_p))
+        player_noise_matrix = 1.0 + (base_noise * volatility_arr)
         
         for i in range(n_sims):
-            # Apply Correlation (60% Self, 40% Team)
+            # Combined Correlation
             sim_team_noise = team_noise_matrix[i][player_team_indices]
+            # 60% Own Volatility, 40% Team Environment
             combined_noise = (player_noise_matrix[i] * 0.6) + (sim_team_noise * 0.4)
+            
             sim_p = self.df['Proj'].values * combined_noise
             
             res = milp(c=-sim_p, constraints=constraints, integrality=np.ones(self.n_p), bounds=Bounds(0, 1))
@@ -203,8 +221,9 @@ class VantageOptimizer:
         
         return [{
             'df': self.get_dk_slots(self.df.iloc[list(idx)]), 
-            'rel_score': int((count/max_freq)*100), # Normalized Score (0-100)
+            'rel_score': int((count/max_freq)*100), 
             'proj': self.df.iloc[list(idx)]['Proj'].sum(),
+            'ceil': self.df.iloc[list(idx)]['Ceil'].sum(),
             'hammer_count': self.df.iloc[list(idx)]['time_obj'].apply(lambda t: t == latest_time).sum()
         } for idx, count in sorted_lineups]
 
@@ -223,7 +242,6 @@ if 'results' in st.session_state:
     cols = st.columns(2)
     for i, res in enumerate(st.session_state.results):
         score = res['rel_score']
-        # Card Color Logic based on VANTAGE SCORE
         card_class = "card-elite" if score >= 90 else "card-strong" if score >= 75 else "card-standard"
         
         # Construct Rows Strictly
@@ -234,6 +252,7 @@ if 'results' in st.session_state:
             team = row.get('Team', 'N/A')
             sal = int(row.get('Sal', 0))
             proj = round(row.get('Proj', 0.0), 1)
+            ceil = round(row.get('Ceil', 0.0), 1)
             
             rows_html += f"""
             <tr>
@@ -241,6 +260,7 @@ if 'results' in st.session_state:
                 <td><span class="name">{name}</span> <span class="meta">({team})</span></td>
                 <td class="sal">${sal}</td>
                 <td class="proj">{proj}</td>
+                <td class="ceil">{ceil}</td>
             </tr>"""
         
         # Badges
@@ -256,11 +276,14 @@ if 'results' in st.session_state:
                         <span style="font-weight:bold; font-size:1.1em; color: white;">LINEUP #{i+1}</span>
                         {hammer_badge}
                     </div>
-                    <span class="badge">SCORE: {score}</span>
+                    <div>
+                        <span class="badge" style="background:#238636;">SCORE: {score}</span>
+                        <span class="badge" style="background:#d29922;">CEIL: {round(res['ceil'], 1)}</span>
+                    </div>
                 </div>
                 <table>
                     <thead>
-                        <tr><th>POS</th><th>PLAYER</th><th>SAL</th><th>PROJ</th></tr>
+                        <tr><th>POS</th><th>PLAYER</th><th>SAL</th><th>PROJ</th><th>99%</th></tr>
                     </thead>
                     <tbody>
                         {rows_html}
