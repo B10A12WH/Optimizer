@@ -35,8 +35,9 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# INJURY BLACKLIST
-FORCED_OUT = ["Toppin", "Haliburton", "Mathurin", "Garland", "Brunson", "Kyrie", "Embiid", "Hartenstein", "Gafford"]
+# IRON-CLAD INJURY BLACKLIST
+# ADDED KUMINGA HERE
+FORCED_OUT = ["Kuminga", "Toppin", "Haliburton", "Mathurin", "Garland", "Brunson", "Kyrie", "Embiid", "Hartenstein", "Gafford"]
 
 @st.cache_data
 def process_data(file_bytes, manual_scratches_str):
@@ -58,8 +59,9 @@ def process_data(file_bytes, manual_scratches_str):
     mask = df['Name'].str.lower().apply(lambda x: any(scratch in x for scratch in full_scratch_list))
     df = df[~mask]
     
-    # Hard Logic for Obi Toppin
+    # NUCLEAR FILTER: Specific hard-code to stop Kuminga and Toppin
     df = df[~df['Name'].str.contains("Toppin", case=False)]
+    df = df[~df['Name'].str.contains("Kuminga", case=False)]
     
     return df[df['Proj'] > 0.1].reset_index(drop=True)
 
@@ -139,10 +141,6 @@ class VantageOptimizer:
         n_teams = len(unique_teams)
         
         # --- DYNAMIC VOLATILITY (THE PUNT FILTER) ---
-        # We assign different risk levels based on salary.
-        # Cheap players (<$4k) get HIGH volatility (0.25).
-        # Expensive players (>$8k) get LOW volatility (0.15).
-        
         volatility_arr = []
         for sal in self.df['Sal']:
             if sal < 4000:
@@ -154,7 +152,6 @@ class VantageOptimizer:
         volatility_arr = np.array(volatility_arr)
         
         # CALCULATE 99th PERCENTILE (CEILING) for Display
-        # Ceiling = Proj + (Proj * Volatility * 2.33) -> 99th percentile of Normal dist.
         self.df['Ceil'] = self.df['Proj'] + (self.df['Proj'] * volatility_arr * 2.33)
 
         # --- MILP SETUP ---
@@ -191,18 +188,13 @@ class VantageOptimizer:
         progress_bar = st.progress(0)
         
         # --- GENERATE SIMS ---
-        # 1. Team Environment Noise (15% Variance)
         team_noise_matrix = np.random.normal(1.0, 0.15, (n_sims, n_teams))
-        
-        # 2. Player Individual Noise (Using Dynamic Volatility)
-        # We create a matrix of random normals (mean=0, std=1) then scale by specific volatility
         base_noise = np.random.normal(0, 1, (n_sims, self.n_p))
         player_noise_matrix = 1.0 + (base_noise * volatility_arr)
         
         for i in range(n_sims):
             # Combined Correlation
             sim_team_noise = team_noise_matrix[i][player_team_indices]
-            # 60% Own Volatility, 40% Team Environment
             combined_noise = (player_noise_matrix[i] * 0.6) + (sim_team_noise * 0.4)
             
             sim_p = self.df['Proj'].values * combined_noise
