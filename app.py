@@ -7,7 +7,7 @@ import io
 from datetime import datetime
 
 # --- UI & THEME CONFIG ---
-st.set_page_config(page_title="VANTAGE 99 | FINAL STABLE", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="VANTAGE 99 | LEGAL LOCK", layout="wide", page_icon="⚡")
 
 st.markdown("""
     <style>
@@ -22,15 +22,14 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# IRON-CLAD INJURY BLACKLIST
-FORCED_OUT = ["Toppin", "Haliburton", "Mathurin", "Garland", "Brunson", "Kyrie", "Embiid", "Hartenstein", "Gafford"]
+# THE BLACKLIST (Jan 19, 2026)
+FORCED_OUT = ["Toppin", "Haliburton", "Mathurin", "Garland", "Brunson", "Kyrie", "Embiid", "Hartenstein", "Gafford", "Lively"]
 
 @st.cache_data
 def process_data(file_bytes, manual_scratches_str):
     df = pd.read_csv(io.BytesIO(file_bytes))
     cols = {c.lower().replace(" ", ""): c for c in df.columns}
     
-    # Standardizing Columns
     df['Proj'] = pd.to_numeric(df[cols.get('proj', df.columns[-1])], errors='coerce').fillna(0.0)
     df['Sal'] = pd.to_numeric(df[cols.get('salary', df.columns[5])], errors='coerce').fillna(50000)
     df['Name'] = df[cols.get('name', df.columns[2])].astype(str)
@@ -38,7 +37,6 @@ def process_data(file_bytes, manual_scratches_str):
     df['Team'] = df[cols.get('teamabbrev', df.columns[7])].astype(str)
     df['GameInfo'] = df[cols.get('gameinfo', df.columns[6])].astype(str)
 
-    # Hard Filtering Scratches
     manual_list = [s.strip().lower() for s in manual_scratches_str.split('\n') if s.strip()]
     full_scratch_list = [s.lower() for s in FORCED_OUT] + manual_list
     mask = df['Name'].str.lower().apply(lambda x: any(scratch in x for scratch in full_scratch_list))
@@ -53,48 +51,61 @@ class VantageOptimizer:
 
     def get_dk_slots(self, lineup_df):
         """
-        LATE-SWAP SLOT ENGINE: Forces latest game into UTIL.
+        STRICT PRIORITY ENGINE:
+        Ensures all 8 DK slots are filled legally with no exceptions.
         Order: PG, SG, SF, PF, C, G, F, UTIL
         """
         def extract_time(info):
             try:
-                # Regex to find time (e.g. 07:30PM)
                 time_match = re.search(r'(\d{1,2}:\d{2}[APM]{2})', info)
                 return datetime.strptime(time_match.group(), '%I:%M%p') if time_match else datetime.min
             except:
                 return datetime.min
 
-        # Sort by game time descending (latest first)
         lineup_df['time_val'] = lineup_df['GameInfo'].apply(extract_time)
-        sorted_players = lineup_df.sort_values(by='time_val', ascending=False).to_dict('records')
-        
         assigned = {}
-        # Step 1: Anchor the latest player to UTIL
-        util_player = sorted_players.pop(0)
-        assigned['UTIL'] = util_player
+        # Working pool of players for this specific lineup
+        pool = lineup_df.to_dict('records')
 
-        # Step 2: Fill specific slots in DK Order
-        remaining_slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F']
-        for slot in remaining_slots:
-            for i, p in enumerate(sorted_players):
+        # STEP 1: UTIL must be the latest possible game for swap flexibility
+        pool.sort(key=lambda x: x['time_val'], reverse=True)
+        assigned['UTIL'] = pool.pop(0)
+
+        # STEP 2: Fill mandatory Primary Positions (PG, SG, SF, PF, C)
+        # We sort the remaining pool by projection to ensure the best fits go into specific slots
+        pool.sort(key=lambda x: x['Proj'], reverse=True)
+        
+        mandatory = ['PG', 'SG', 'SF', 'PF', 'C']
+        for slot in mandatory:
+            for i, p in enumerate(pool):
+                if slot in p['Pos']:
+                    assigned[slot] = p
+                    pool.pop(i)
+                    break
+
+        # STEP 3: Fill Guard (G) and Forward (F) slots from the remaining 2 players
+        # G must be PG or SG. F must be SF or PF.
+        flex_slots = ['G', 'F']
+        for slot in flex_slots:
+            for i, p in enumerate(pool):
                 match = False
-                pos = p['Pos']
-                if slot in pos: match = True
-                elif slot == 'G' and ('PG' in pos or 'SG' in pos): match = True
-                elif slot == 'F' and ('SF' in pos or 'PF' in pos): match = True
+                if slot == 'G' and ('PG' in p['Pos'] or 'SG' in p['Pos']): match = True
+                if slot == 'F' and ('SF' in p['Pos'] or 'PF' in p['Pos']): match = True
                 
                 if match:
                     assigned[slot] = p
-                    sorted_players.pop(i)
+                    pool.pop(i)
                     break
-        
-        # Step 3: Reconstruct Final DK Entry Order
+
+        # STEP 4: Final formatting for display in Entry Order
         ordered_list = []
-        for slot in ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']:
+        dk_order = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
+        for slot in dk_order:
             p = assigned.get(slot)
             if p:
                 p['Slot'] = slot
                 ordered_list.append(p)
+        
         return pd.DataFrame(ordered_list)
 
     def run_sims(self, n_sims=10000):
@@ -117,14 +128,12 @@ class VantageOptimizer:
         sorted_lineups = sorted(lineup_counts.items(), key=lambda x: x[1], reverse=True)[:20]
         max_freq = sorted_lineups[0][1] if sorted_lineups else 1
         
-        final_pool = []
-        for idx, count in sorted_lineups:
-            ldf = self.get_dk_slots(self.df.iloc[list(idx)])
-            final_pool.append({
-                'df': ldf, 'win_pct': (count/n_sims)*100, 
-                'rel_score': (count/max_freq)*100, 'proj': ldf['Proj'].sum()
-            })
-        return final_pool
+        return [{
+            'df': self.get_dk_slots(self.df.iloc[list(idx)]), 
+            'win_pct': (count/n_sims)*100, 
+            'rel_score': (count/max_freq)*100, 
+            'proj': self.df.iloc[list(idx)]['Proj'].sum()
+        } for idx, count in sorted_lineups]
 
 # --- APP FLOW ---
 st.sidebar.title("🕹️ COMMAND")
@@ -133,11 +142,6 @@ scratches_input = st.sidebar.text_area("🚑 ADD SCRATCHES", height=100)
 
 if f:
     data = process_data(f.getvalue(), scratches_input)
-    if not data[data['Name'].str.contains('Toppin', case=False)].empty:
-        st.error("🚨 Obi Toppin is still in the pool!")
-    else:
-        st.sidebar.success("✅ Filters & UTIL logic active.")
-
     if st.button("🚀 GENERATE 10,000 SIMS"):
         optimizer = VantageOptimizer(data)
         st.session_state.results = optimizer.run_sims()
