@@ -89,67 +89,85 @@ class VantageOptimizer:
 
     def get_dk_slots(self, lineup_df):
         """
-        PLAYER-CENTRIC SOLVER:
-        Re-creates the DataFrame from the assigned players list to avoid KeyErrors.
+        SCARCITY-BASED SOLVER (Slot-Centric):
+        1. Identifies which SLOTS are hardest to fill (e.g. only 1 player fits PF).
+        2. Fills those slots FIRST.
         """
-        # Convert to list of dicts for the recursive solver
+        lineup_df = lineup_df.copy()
         players = lineup_df.to_dict('records')
         
-        all_slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
+        # The 8 target slots
+        required_slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
         
-        def get_valid_slots_for_player(p):
-            pos = p['Pos']
-            valid = []
-            if 'PG' in pos: valid.extend(['PG', 'G', 'UTIL'])
-            if 'SG' in pos: valid.extend(['SG', 'G', 'UTIL'])
-            if 'SF' in pos: valid.extend(['SF', 'F', 'UTIL'])
-            if 'PF' in pos: valid.extend(['PF', 'F', 'UTIL'])
-            if 'C' in pos: valid.extend(['C', 'UTIL'])
-            return sorted(list(set(valid)))
+        # Helper: Does this player fit this slot?
+        def fits(player, slot):
+            pos = player['Pos']
+            if slot == 'UTIL': return True
+            if slot == 'G': return ('PG' in pos or 'SG' in pos)
+            if slot == 'F': return ('SF' in pos or 'PF' in pos)
+            return slot in pos
 
-        # 1. Sort by restrictiveness
-        for p in players:
-            p['valid_slots'] = get_valid_slots_for_player(p)
-            p['n_options'] = len(p['valid_slots'])
-            
-        players.sort(key=lambda x: x['n_options'])
-        
-        # 2. Recursive Placement
-        def place_player(player_idx, open_slots):
-            if player_idx == len(players):
+        # Recursive Solver State
+        # assignment: map of slot_index (0-7) -> player_index
+        assignment = {} 
+        used_players = set()
+
+        def solve():
+            # If we have assigned all 8 slots, we are done
+            if len(assignment) == 8:
                 return True
             
-            p = players[player_idx]
+            # SCARCITY LOGIC:
+            # Find the unassigned slot with the FEWEST eligible players remaining
+            best_slot_idx = -1
+            min_candidates = 999
+            candidates_for_best = []
             
-            for slot in p['valid_slots']:
-                if slot in open_slots:
-                    fits = False
-                    if slot == 'UTIL': fits = True
-                    elif slot == 'G': fits = ('PG' in p['Pos'] or 'SG' in p['Pos'])
-                    elif slot == 'F': fits = ('SF' in p['Pos'] or 'PF' in p['Pos'])
-                    else: fits = (slot in p['Pos'])
-                    
-                    if fits:
-                        p['Slot'] = slot
-                        new_open = open_slots.copy()
-                        new_open.remove(slot)
-                        if place_player(player_idx + 1, new_open):
-                            return True
+            for i, slot_name in enumerate(required_slots):
+                if i in assignment: continue # Already filled
+                
+                # Count eligible players for this slot
+                eligible = []
+                for p_idx, p in enumerate(players):
+                    if p_idx not in used_players and fits(p, slot_name):
+                        eligible.append(p_idx)
+                
+                # If a slot has 0 candidates, this path is dead
+                if len(eligible) == 0:
+                    return False
+                
+                # If this slot is tighter than the best so far, pick it
+                if len(eligible) < min_candidates:
+                    min_candidates = len(eligible)
+                    best_slot_idx = i
+                    candidates_for_best = eligible
+            
+            # Now try to fill this "hardest" slot
+            # Try candidates (Heuristic: Try highest salary first? Or just order)
+            for p_idx in candidates_for_best:
+                assignment[best_slot_idx] = p_idx
+                used_players.add(p_idx)
+                
+                if solve():
+                    return True
+                
+                # Backtrack
+                del assignment[best_slot_idx]
+                used_players.remove(p_idx)
+                
             return False
 
-        initial_slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
-        success = place_player(0, initial_slots)
-        
-        if success:
-            # Re-create DataFrame from the UPDATED players list
-            result_df = pd.DataFrame(players)
-            
-            display_map = {k: v for v, k in enumerate(all_slots)}
-            result_df['sort_val'] = result_df['Slot'].map(display_map)
-            return result_df.sort_values('sort_val').drop(['valid_slots', 'n_options', 'sort_val'], axis=1, errors='ignore')
+        if solve():
+            # Build the result
+            ordered_players = []
+            for i, slot in enumerate(required_slots):
+                p_idx = assignment[i]
+                p = players[p_idx]
+                p['Slot'] = slot
+                ordered_players.append(p)
+            return pd.DataFrame(ordered_players)
         else:
             # Fallback
-            lineup_df = lineup_df.copy()
             lineup_df['Slot'] = 'UTIL'
             return lineup_df
 
