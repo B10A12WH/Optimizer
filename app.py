@@ -90,16 +90,13 @@ class VantageOptimizer:
     def get_dk_slots(self, lineup_df):
         """
         PLAYER-CENTRIC SOLVER:
-        Sorts players by 'Restrictiveness' (fewest eligible slots) and places them first.
-        This fixes the "Two Centers" bug where the solver paints itself into a corner.
+        Re-creates the DataFrame from the assigned players list to avoid KeyErrors.
         """
-        lineup_df = lineup_df.copy()
+        # Convert to list of dicts for the recursive solver
         players = lineup_df.to_dict('records')
         
-        # Valid Slots
         all_slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
         
-        # Helper: Which slots can this player theoretically fill?
         def get_valid_slots_for_player(p):
             pos = p['Pos']
             valid = []
@@ -108,10 +105,9 @@ class VantageOptimizer:
             if 'SF' in pos: valid.extend(['SF', 'F', 'UTIL'])
             if 'PF' in pos: valid.extend(['PF', 'F', 'UTIL'])
             if 'C' in pos: valid.extend(['C', 'UTIL'])
-            return sorted(list(set(valid))) # Dedup
-            
-        # 1. Sort players by how HARD they are to place (fewest options first)
-        # e.g. Pure Center (2 options: C, UTIL) goes before PG/SG (4 options)
+            return sorted(list(set(valid)))
+
+        # 1. Sort by restrictiveness
         for p in players:
             p['valid_slots'] = get_valid_slots_for_player(p)
             p['n_options'] = len(p['valid_slots'])
@@ -119,19 +115,14 @@ class VantageOptimizer:
         players.sort(key=lambda x: x['n_options'])
         
         # 2. Recursive Placement
-        assignment = {} # Slot -> Player Name (or ID)
-        
         def place_player(player_idx, open_slots):
             if player_idx == len(players):
-                return True # All players placed successfully
+                return True
             
             p = players[player_idx]
             
-            # Try to put this player in any OPEN slot they qualify for
             for slot in p['valid_slots']:
                 if slot in open_slots:
-                    # HEURISTIC: Does this player actually fit the slot definition?
-                    # (Double check mainly for G/F logic nuances)
                     fits = False
                     if slot == 'UTIL': fits = True
                     elif slot == 'G': fits = ('PG' in p['Pos'] or 'SG' in p['Pos'])
@@ -139,27 +130,26 @@ class VantageOptimizer:
                     else: fits = (slot in p['Pos'])
                     
                     if fits:
-                        # Place them
                         p['Slot'] = slot
                         new_open = open_slots.copy()
                         new_open.remove(slot)
-                        
-                        # Recurse
                         if place_player(player_idx + 1, new_open):
                             return True
             return False
 
-        # Start with all slots open
         initial_slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
         success = place_player(0, initial_slots)
         
         if success:
-            # Sort output by standard DK order for display
+            # Re-create DataFrame from the UPDATED players list
+            result_df = pd.DataFrame(players)
+            
             display_map = {k: v for v, k in enumerate(all_slots)}
-            lineup_df['sort_val'] = lineup_df['Slot'].map(display_map)
-            return lineup_df.sort_values('sort_val').drop(['valid_slots', 'n_options', 'sort_val'], axis=1, errors='ignore')
+            result_df['sort_val'] = result_df['Slot'].map(display_map)
+            return result_df.sort_values('sort_val').drop(['valid_slots', 'n_options', 'sort_val'], axis=1, errors='ignore')
         else:
             # Fallback
+            lineup_df = lineup_df.copy()
             lineup_df['Slot'] = 'UTIL'
             return lineup_df
 
