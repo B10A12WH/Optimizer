@@ -3,9 +3,22 @@ import pandas as pd
 import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
 import re
+import io
 
 # --- ELITE UI & MULTI-SPORT CONFIG ---
-st.set_page_config(page_title="VANTAGE 99 | DK ENTRY ORDER", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="VANTAGE 99 | DK LEGAL ALPHA", layout="wide", page_icon="⚡")
+
+# Institutional Styling
+st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
+    .main { background-color: #0d1117; color: #c9d1d9; font-family: 'JetBrains Mono', monospace; }
+    div[data-testid="stMetric"] { background: rgba(22, 27, 34, 0.9); border: 1px solid #30363d; border-radius: 12px; padding: 15px; }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .stTabs [data-baseweb="tab"] { background-color: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 10px 20px; color: #8b949e; }
+    .stTabs [aria-selected="true"] { background-color: #238636; color: white; border: none; }
+    </style>
+    """, unsafe_allow_html=True)
 
 class VantageUnifiedOptimizer:
     def __init__(self, df, sport="NBA"):
@@ -14,6 +27,7 @@ class VantageUnifiedOptimizer:
         self._clean_data()
 
     def _clean_data(self):
+        # Auto-detect headers and strictly purge "Out" or Zero-Proj players
         cols = {c.lower().replace(" ", ""): c for c in self.df.columns}
         self.df['Proj'] = pd.to_numeric(self.df[self._hunt(['proj', 'fppg', 'avgpoints'], cols)], errors='coerce').fillna(0.0)
         self.df['Sal'] = pd.to_numeric(self.df[self._hunt(['salary', 'cost'], cols)], errors='coerce').fillna(50000)
@@ -29,102 +43,96 @@ class VantageUnifiedOptimizer:
                 if k in actual_col: return col_map[actual_col]
         return self.df.columns[0]
 
-    def get_legal_slots(self, lineup_df):
+    def get_dk_slots(self, lineup_df):
         """
-        HARD LOCK: Assigns players to specific DraftKings legal slots in correct entry order.
-        Order: PG, SG, SF, PF, C, G, F, UTIL 
+        SLOT ASSIGNMENT ENGINE: Hard-orders players into DK entry slots
+        NBA: PG, SG, SF, PF, C, G, F, UTIL
+        NFL: QB, RB, RB, WR, WR, WR, TE, FLEX, DST
         """
         if self.sport == "NFL":
-            # NFL Order: QB, RB, RB, WR, WR, WR, TE, FLEX, DST
             slots = ['QB', 'RB', 'RB', 'WR', 'WR', 'WR', 'TE', 'FLEX', 'DST']
         else:
-            # NBA Order: PG, SG, SF, PF, C, G, F, UTIL 
             slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
         
         assigned = []
-        remaining_players = lineup_df.to_dict('records')
+        players = lineup_df.to_dict('records')
 
         for slot in slots:
-            for i, player in enumerate(remaining_players):
-                can_fill = False
-                pos = player['Pos']
-                
-                # Logic for NBA Slot Filling 
+            for i, p in enumerate(players):
+                match = False
+                pos = p['Pos']
                 if self.sport == "NBA":
-                    if slot in pos: can_fill = True
-                    elif slot == 'G' and ('PG' in pos or 'SG' in pos): can_fill = True
-                    elif slot == 'F' and ('SF' in pos or 'PF' in pos): can_fill = True
-                    elif slot == 'UTIL': can_fill = True
-                
-                # Logic for NFL Slot Filling 
+                    if slot in pos: match = True
+                    elif slot == 'G' and ('PG' in pos or 'SG' in pos): match = True
+                    elif slot == 'F' and ('SF' in pos or 'PF' in pos): match = True
+                    elif slot == 'UTIL': match = True
                 elif self.sport == "NFL":
-                    if slot == player['Pos']: can_fill = True
-                    elif slot == 'FLEX' and any(x in pos for x in ['RB', 'WR', 'TE']): can_fill = True
+                    if slot == pos: match = True
+                    elif slot == 'FLEX' and any(x in pos for x in ['RB', 'WR', 'TE']): match = True
                 
-                if can_fill:
-                    p_copy = player.copy()
-                    p_copy['Slot'] = slot
-                    assigned.append(p_copy)
-                    remaining_players.pop(i)
+                if match:
+                    p['Slot'] = slot
+                    assigned.append(p)
+                    players.pop(i)
                     break
-        
         return pd.DataFrame(assigned)
 
-    def get_legal_constraints(self):
+    def get_hard_lock_constraints(self):
+        """ Hard-Locked Positional Rules """
         n_p = len(self.df)
         A, bl, bu = [], [], []
-        # Total Players
+        # Total Size & Salary Cap
         total = 9 if self.sport == "NFL" else 8
         A.append(np.ones(n_p)); bl.append(total); bu.append(total)
-        # Salary
         A.append(self.df['Sal'].values); bl.append(45000); bu.append(50000)
 
         if self.sport == "NFL":
-            # DraftKings NFL Positions 
             for p in ['QB', 'RB', 'WR', 'TE', 'DST']:
-                mask = (self.df['Pos'] == p).astype(int).values
+                A.append((self.df['Pos'] == p).astype(int).values)
                 if p == 'QB': bl.append(1); bu.append(1)
                 elif p == 'RB': bl.append(2); bu.append(3)
                 elif p == 'WR': bl.append(3); bu.append(4)
                 elif p == 'TE': bl.append(1); bu.append(2)
                 else: bl.append(1); bu.append(1)
-                A.append(mask)
-        else:
-            # DraftKings NBA Positions (Accounting for multi-eligibility) 
+        else: # NBA Multi-Pos Coverage
             for p in ['PG', 'SG', 'SF', 'PF', 'C']:
                 A.append(self.df['Pos'].str.contains(p).astype(int).values); bl.append(1); bu.append(5)
 
         return np.vstack(A), bl, bu
 
-    def run_alpha_sims(self, n_lineups=10):
+    def run_alpha_sims(self, n_lineups=20, correlation=0.5, leverage=0.5):
         n_p = len(self.df)
-        A, bl, bu = self.get_legal_constraints()
-        lineup_pool = []
+        teams = self.df['Team'].unique()
+        A, bl, bu = self.get_hard_lock_constraints()
+        pool = []
         
-        # Performance Sim logic
-        raw_p = self.df['Proj'].values
-        for i in range(500):
-            sim_p = np.random.normal(raw_p, raw_p * 0.2).clip(min=0)
-            res = milp(c=-sim_p, constraints=LinearConstraint(A, bl, bu),
-                       integrality=np.ones(n_p), bounds=Bounds(0, 1))
+        for i in range(1000):
+            t_shift = {t: np.random.normal(1.0, 0.15 * correlation) for t in teams}
+            sim_p = np.array([row['Proj'] * t_shift[row['Team']] * np.random.normal(1.0, 0.1) for _, row in self.df.iterrows()])
+            sim_p *= (1 - (self.df['Own'].values * (leverage / 150)))
+            
+            res = milp(c=-sim_p, constraints=LinearConstraint(A, bl, bu), integrality=np.ones(n_p), bounds=Bounds(0, 1))
             if res.success:
                 idx = np.where(res.x > 0.5)[0]
-                lineup_pool.append(self.df.iloc[idx])
-            if len(lineup_pool) >= n_lineups: break
-        return lineup_pool
+                pool.append({'idx': tuple(idx), 'sim_score': sim_p[idx].sum()})
+            if len(pool) >= n_lineups * 2: break
+        
+        unique = {e['idx']: e for e in pool}.values()
+        sorted_pool = sorted(unique, key=lambda x: x['sim_score'], reverse=True)[:n_lineups]
+        return [self.get_dk_slots(self.df.iloc[list(e['idx'])]) for e in sorted_pool]
 
-# --- UI ---
-st.title("⚡ VANTAGE 99 | ENTRY READY")
-mode = st.sidebar.radio("SPORT", ["NBA", "NFL"])
-f = st.file_uploader("UPLOAD SALARY CSV", type="csv")
+# --- UI INTERFACE ---
+st.title("⚡ VANTAGE 99 | LEGAL ALPHA")
+with st.sidebar:
+    mode = st.radio("SPORT", ["NBA", "NFL"])
+    uploaded_file = st.file_uploader("SALARY CSV", type="csv")
+    corr = st.slider("Correlation", 0.0, 1.0, 0.6)
+    lev = st.slider("Leverage", 0.0, 1.0, 0.4)
 
-if f:
-    engine = VantageUnifiedOptimizer(pd.read_csv(f), sport=mode)
-    if st.button("🚀 GENERATE ORDERED LINEUPS"):
-        results = engine.run_alpha_sims()
-        for i, ldf in enumerate(results):
-            # Apply the Slot Assignment Engine 
-            ordered_df = engine.get_legal_slots(ldf)
-            with st.expander(f"LINEUP #{i+1} | Total Proj: {round(ordered_df['Proj'].sum(), 1)}"):
-                # Display in legal DraftKings format 
-                st.table(ordered_df[['Slot', 'Name', 'Team', 'Sal', 'Proj']])
+if uploaded_file:
+    engine = VantageUnifiedOptimizer(pd.read_csv(uploaded_file), sport=mode)
+    if st.button(f"⚡ GENERATE ORDERED {mode} LINEUPS"):
+        st.session_state.results = engine.run_alpha_sims(correlation=corr, leverage=lev)
+        for i, ldf in enumerate(st.session_state.results):
+            with st.expander(f"LINEUP #{i+1} | Proj: {round(ldf['Proj'].sum(), 1)}"):
+                st.table(ldf[['Slot', 'Name', 'Team', 'Sal', 'Proj']])
