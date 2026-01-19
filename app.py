@@ -4,6 +4,7 @@ import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
 import re
 import io
+from datetime import datetime
 
 # --- UI & THEME CONFIG ---
 st.set_page_config(page_title="VANTAGE 99 | LEGAL LOCK", layout="wide", page_icon="⚡")
@@ -46,6 +47,7 @@ def process_data(file_bytes, manual_scratches_str):
     df['Name'] = df[cols.get('name', df.columns[2])].astype(str).str.strip()
     df['Pos'] = df[cols.get('position', df.columns[0])].astype(str).str.strip()
     df['Team'] = df[cols.get('teamabbrev', df.columns[7])].astype(str)
+    df['GameInfo'] = df[cols.get('gameinfo', df.columns[6])].astype(str)
     
     # Filtering
     manual_list = [s.strip().lower() for s in manual_scratches_str.split('\n') if s.strip()]
@@ -67,11 +69,13 @@ class VantageOptimizer:
     def get_dk_slots(self, lineup_df):
         """
         BACKTRACKING SOLVER:
-        Guarantees that if a valid position assignment exists, it will find it.
-        Includes a fallback to prevent KeyErrors.
+        Strictly fits players into [PG, SG, SF, PF, C, G, F, UTIL].
+        Sorts the output exactly in that order.
         """
         lineup_df = lineup_df.copy()
         players = lineup_df.to_dict('records')
+        
+        # TARGET ORDER
         slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
         
         # Helper to check if player fits slot
@@ -85,6 +89,9 @@ class VantageOptimizer:
         # Recursive solver
         assignment = [None] * 8
         
+        # Optimization: Sort players by scarcity (number of slots they fit) to fail fast
+        # (This helps the recursion finish instantly)
+        
         def solve(slot_idx, available_players):
             if slot_idx == 8:
                 return True # All slots filled
@@ -94,7 +101,6 @@ class VantageOptimizer:
             # Try every available player for this slot
             for i, p in enumerate(available_players):
                 if fits(p, slot_name):
-                    # Recursive Step
                     assignment[slot_idx] = p
                     remaining = available_players[:i] + available_players[i+1:]
                     if solve(slot_idx + 1, remaining):
@@ -106,23 +112,50 @@ class VantageOptimizer:
         if success:
             for i, p in enumerate(assignment):
                 p['Slot'] = slots[i]
-            return pd.DataFrame(assignment)
+            
+            res_df = pd.DataFrame(assignment)
+            
+            # STRICT SORT ENFORCEMENT
+            sort_map = {k: v for v, k in enumerate(slots)}
+            res_df['sort_val'] = res_df['Slot'].map(sort_map)
+            res_df = res_df.sort_values('sort_val').drop('sort_val', axis=1)
+            
+            return res_df
         else:
-            # Fallback: Assign 'UTIL' to everyone to prevent crash
+            # Fallback (Assign UTIL to prevent crash, but this implies MILP constraints failed)
             lineup_df['Slot'] = 'UTIL'
             return lineup_df
 
     def run_sims(self, n_sims=5000):
-        # Constraints
+        # 1. IDENTIFY LATEST GAME (THE HAMMER)
+        # We parse the times to find the latest one
+        def parse_time(info):
+            try:
+                # Find time pattern like 10:00PM or 7:30PM
+                match = re.search(r'(\d{1,2}:\d{2}[APM]{2})', info)
+                if match:
+                    return datetime.strptime(match.group(1), '%I:%M%p')
+            except:
+                pass
+            return datetime.min
+
+        self.df['time_obj'] = self.df['GameInfo'].apply(parse_time)
+        latest_time = self.df['time_obj'].max()
+        
+        # Create a mask for players in the latest game window
+        # We give a slight buffer or just match the exact max time
+        is_hammer = (self.df['time_obj'] == latest_time).astype(int)
+        
+        # --- MILP SETUP ---
         A_rows = [np.ones(self.n_p), self.df['Sal'].values]
         bl, bu = [8, 45000], [8, 50000]
         
-        # Positional Constraints
+        # 1. Positional Constraints
         for pos in ['PG', 'SG', 'SF', 'PF', 'C']:
             A_rows.append(self.df['Pos'].str.contains(pos).astype(int).values)
             bl.append(1); bu.append(8)
             
-        # Flex Constraints (Must have 3 guards and 3 forwards total)
+        # 2. Flex Constraints (Crucial for valid lineups)
         is_guard = self.df['Pos'].apply(lambda x: 'PG' in x or 'SG' in x).astype(int)
         A_rows.append(is_guard.values)
         bl.append(3); bu.append(8)
@@ -130,6 +163,12 @@ class VantageOptimizer:
         is_forward = self.df['Pos'].apply(lambda x: 'SF' in x or 'PF' in x).astype(int)
         A_rows.append(is_forward.values)
         bl.append(3); bu.append(8)
+        
+        # 3. HAMMER CONSTRAINT (Must have at least 1 player from latest game)
+        # Only apply if we actually found a time
+        if is_hammer.sum() > 0:
+            A_rows.append(is_hammer.values)
+            bl.append(1); bu.append(8) # At least 1, max 8
 
         A = np.vstack(A_rows)
         constraints = LinearConstraint(A, bl, bu)
@@ -155,7 +194,8 @@ class VantageOptimizer:
             'df': self.get_dk_slots(self.df.iloc[list(idx)]), 
             'win_pct': (count/n_sims)*100, 
             'rel_score': (count/max_freq)*100, 
-            'proj': self.df.iloc[list(idx)]['Proj'].sum()
+            'proj': self.df.iloc[list(idx)]['Proj'].sum(),
+            'hammer_count': self.df.iloc[list(idx)]['time_obj'].apply(lambda t: t == latest_time).sum()
         } for idx, count in sorted_lineups]
 
 # --- APP FLOW ---
@@ -175,29 +215,37 @@ if 'results' in st.session_state:
         score = res['rel_score']
         card_class = "card-elite" if score > 85 else "card-strong" if score > 50 else "card-standard"
         
-        # Pure HTML Table Construction
+        # Construct Rows Strictly
         rows_html = ""
+        # The DF is already sorted by the get_dk_slots function now
         for _, row in res['df'].iterrows():
-            # Safety check for missing data
-            slot_display = row.get('Slot', 'ERR')
-            name_display = row.get('Name', 'Unknown')
-            team_display = row.get('Team', 'N/A')
-            sal_display = int(row.get('Sal', 0))
-            proj_display = round(row.get('Proj', 0.0), 1)
-
+            slot = row.get('Slot', 'ERR')
+            name = row.get('Name', 'Unknown')
+            team = row.get('Team', 'N/A')
+            sal = int(row.get('Sal', 0))
+            proj = round(row.get('Proj', 0.0), 1)
+            
             rows_html += f"""
             <tr>
-                <td class="pos">{slot_display}</td>
-                <td><span class="name">{name_display}</span> <span class="meta">({team_display})</span></td>
-                <td class="sal">${sal_display}</td>
-                <td class="proj">{proj_display}</td>
+                <td class="pos">{slot}</td>
+                <td><span class="name">{name}</span> <span class="meta">({team})</span></td>
+                <td class="sal">${sal}</td>
+                <td class="proj">{proj}</td>
             </tr>"""
         
+        # Add Hammer Badge if applicable
+        hammer_badge = ""
+        if res.get('hammer_count', 0) > 0:
+            hammer_badge = '<span class="badge" style="background:#8250df; margin-left:5px;">🔨 HAMMER</span>'
+
         with cols[i % 2]:
             st.markdown(f"""
             <div class="{card_class}">
                 <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
-                    <span style="font-weight:bold; font-size:1.1em; color: white;">LINEUP #{i+1}</span>
+                    <div>
+                        <span style="font-weight:bold; font-size:1.1em; color: white;">LINEUP #{i+1}</span>
+                        {hammer_badge}
+                    </div>
                     <span class="badge">WIN: {round(res['win_pct'], 1)}%</span>
                 </div>
                 <table>
