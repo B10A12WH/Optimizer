@@ -4,7 +4,6 @@ import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
 import re
 import io
-from datetime import datetime
 
 # --- UI & THEME CONFIG ---
 st.set_page_config(page_title="VANTAGE 99 | LEGAL LOCK", layout="wide", page_icon="⚡")
@@ -14,30 +13,26 @@ st.markdown("""
     .main { background: radial-gradient(circle at top right, #1a1f2e, #0d1117); color: #c9d1d9; }
     
     /* CARD STYLES */
-    .card-elite { border: 2px solid #238636 !important; background: linear-gradient(145deg, rgba(35, 134, 54, 0.15), rgba(13, 17, 23, 0.9)); box-shadow: 0 0 25px rgba(35, 134, 54, 0.3); }
-    .card-strong { border: 2px solid #d29922 !important; background: linear-gradient(145deg, rgba(210, 153, 34, 0.1), rgba(13, 17, 23, 0.9)); }
-    .card-standard { border: 1px solid #30363d !important; background: rgba(22, 27, 34, 0.8); }
+    .card-elite { border: 1px solid #238636; background: rgba(35, 134, 54, 0.1); padding: 15px; border-radius: 10px; margin-bottom: 20px; }
+    .card-strong { border: 1px solid #d29922; background: rgba(210, 153, 34, 0.1); padding: 15px; border-radius: 10px; margin-bottom: 20px; }
+    .card-standard { border: 1px solid #30363d; background: rgba(48, 54, 61, 0.2); padding: 15px; border-radius: 10px; margin-bottom: 20px; }
     
-    .lineup-card { border-radius: 12px; padding: 15px; margin-bottom: 25px; }
+    /* TABLE STYLES */
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; color: #8b949e; font-size: 12px; border-bottom: 1px solid #30363d; padding-bottom: 5px; }
+    td { padding: 8px 0; border-bottom: 1px solid #21262d; font-size: 14px; }
+    .pos { color: #58a6ff; font-weight: bold; width: 50px; }
+    .name { color: #e6edf3; font-weight: 600; }
+    .meta { color: #8b949e; font-size: 12px; }
+    .sal { color: #7ee787; font-family: monospace; text-align: right; }
+    .proj { color: #c9d1d9; font-weight: bold; text-align: right; }
     
     /* BADGES */
-    .badge-label { padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 800; color: white; margin-left: 5px; letter-spacing: 1px; }
-    .bg-win { background: #238636; box-shadow: 0 0 10px #238636; }
-    .bg-proj { background: #1f6feb; }
-    
-    /* CUSTOM TABLE STYLING */
-    .styled-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.9em; font-family: sans-serif; }
-    .styled-table thead tr { background-color: rgba(48, 54, 61, 0.5); color: #8b949e; text-align: left; }
-    .styled-table th, .styled-table td { padding: 8px 10px; border-bottom: 1px solid #30363d; }
-    .styled-table tbody tr:last-of-type { border-bottom: 2px solid #238636; }
-    .pos-cell { font-weight: bold; color: #58a6ff; }
-    .name-cell { color: #e6edf3; font-weight: 600; }
-    .sal-cell { color: #7ee787; font-family: monospace; }
+    .badge { background: #238636; color: white; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
 
-# IRON-CLAD INJURY BLACKLIST
-# Added "Toppin" specifically here, but also added a nuclear filter in process_data
+# INJURY BLACKLIST
 FORCED_OUT = ["Toppin", "Haliburton", "Mathurin", "Garland", "Brunson", "Kyrie", "Embiid", "Hartenstein", "Gafford"]
 
 @st.cache_data
@@ -45,116 +40,97 @@ def process_data(file_bytes, manual_scratches_str):
     df = pd.read_csv(io.BytesIO(file_bytes))
     cols = {c.lower().replace(" ", ""): c for c in df.columns}
     
-    # Standardizing Columns
+    # Standardize
     df['Proj'] = pd.to_numeric(df[cols.get('proj', df.columns[-1])], errors='coerce').fillna(0.0)
     df['Sal'] = pd.to_numeric(df[cols.get('salary', df.columns[5])], errors='coerce').fillna(50000)
     df['Name'] = df[cols.get('name', df.columns[2])].astype(str).str.strip()
     df['Pos'] = df[cols.get('position', df.columns[0])].astype(str).str.strip()
     df['Team'] = df[cols.get('teamabbrev', df.columns[7])].astype(str)
-    df['GameInfo'] = df[cols.get('gameinfo', df.columns[6])].astype(str)
-
-    # Hard Filtering Scratches
+    
+    # Filtering
     manual_list = [s.strip().lower() for s in manual_scratches_str.split('\n') if s.strip()]
     full_scratch_list = [s.lower() for s in FORCED_OUT] + manual_list
     
-    # 1. Generic Filter
     mask = df['Name'].str.lower().apply(lambda x: any(scratch in x for scratch in full_scratch_list))
     df = df[~mask]
     
-    # 2. NUCLEAR TOPPIN FILTER (Because he keeps sneaking in)
+    # Hard Logic for Obi Toppin
     df = df[~df['Name'].str.contains("Toppin", case=False)]
     
     return df[df['Proj'] > 0.1].reset_index(drop=True)
 
 class VantageOptimizer:
     def __init__(self, df):
-        self.df = df
+        self.df = df.reset_index(drop=True)
         self.n_p = len(df)
 
     def get_dk_slots(self, lineup_df):
         """
-        STRICT POSITION LOCK ENGINE:
-        Ensures proper placement of PG, SG, SF, PF, C, G, F, UTIL
+        BACKTRACKING SOLVER:
+        Guarantees that if a valid position assignment exists, it will find it.
+        Eliminates the 'MISSING' bug caused by greedy logic.
         """
-        def extract_time(info):
-            try:
-                time_match = re.search(r'(\d{1,2}:\d{2}[APM]{2})', info)
-                return datetime.strptime(time_match.group(), '%I:%M%p') if time_match else datetime.min
-            except:
-                return datetime.min
-
-        lineup_df = lineup_df.copy()
-        lineup_df['time_val'] = lineup_df['GameInfo'].apply(extract_time)
-        assigned = {}
-        pool = lineup_df.to_dict('records')
-
-        # 1. UTIL PRIORITY: Identify latest player for potential swap
-        pool.sort(key=lambda x: x['time_val'], reverse=True)
-        util_candidate = pool[0] 
-
-        # 2. MANDATORY PRIMARY SLOTS
-        for slot in ['PG', 'SG', 'SF', 'PF', 'C']:
-            # Sort by: Fits Slot -> Highest Proj
-            pool.sort(key=lambda x: (slot not in x['Pos'], -x['Proj']))
-            for i, p in enumerate(pool):
-                if slot in p['Pos'] and p['Name'] != util_candidate['Name']:
-                    assigned[slot] = p
-                    pool.pop(i)
-                    break
+        players = lineup_df.to_dict('records')
+        slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
         
-        # 3. FILL FLEX SLOTS (G, F)
-        for slot in ['G', 'F']:
-            pool.sort(key=lambda x: -x['Proj'])
-            for i, p in enumerate(pool):
-                match = False
-                if slot == 'G' and ('PG' in p['Pos'] or 'SG' in p['Pos']): match = True
-                if slot == 'F' and ('SF' in p['Pos'] or 'PF' in p['Pos']): match = True
-                
-                if match and p['Name'] != util_candidate['Name']:
-                    assigned[slot] = p
-                    pool.pop(i)
-                    break
+        # Helper to check if player fits slot
+        def fits(player, slot):
+            pos = player['Pos']
+            if slot == 'UTIL': return True
+            if slot == 'G': return ('PG' in pos or 'SG' in pos)
+            if slot == 'F': return ('SF' in pos or 'PF' in pos)
+            return slot in pos
+
+        # Recursive solver
+        assignment = [None] * 8
         
-        # 4. FINAL SLOT (UTIL)
-        if pool:
-            assigned['UTIL'] = pool[0]
+        def solve(slot_idx, available_players):
+            if slot_idx == 8:
+                return True # All slots filled
+            
+            slot_name = slots[slot_idx]
+            
+            # Try every available player for this slot
+            for i, p in enumerate(available_players):
+                if fits(p, slot_name):
+                    # Recursive Step
+                    assignment[slot_idx] = p
+                    remaining = available_players[:i] + available_players[i+1:]
+                    if solve(slot_idx + 1, remaining):
+                        return True
+            
+            return False
 
-        # RE-ORDER FOR DISPLAY
-        ordered_list = []
-        for slot in ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']:
-            p = assigned.get(slot)
-            if p:
-                p['Slot'] = slot
-                ordered_list.append(p)
-            else:
-                # Fallback if logic misses (shouldn't happen with new constraints)
-                ordered_list.append({'Slot': slot, 'Name': 'MISSING', 'Sal': 0, 'Proj': 0, 'Team': 'N/A'})
-                
-        return pd.DataFrame(ordered_list)
+        # Sort players to try "harder" positions first in the recursion logic? 
+        # Actually, backtracking handles it, but let's just run it.
+        success = solve(0, players)
+        
+        if success:
+            for i, p in enumerate(assignment):
+                p['Slot'] = slots[i]
+            return pd.DataFrame(assignment)
+        else:
+            # Fallback (Should never happen due to constraints)
+            return lineup_df
 
-    def run_sims(self, n_sims=10000):
-        # Constraints: 8 players total, Salary <= 50k
+    def run_sims(self, n_sims=5000):
+        # Constraints
         A_rows = [np.ones(self.n_p), self.df['Sal'].values]
         bl, bu = [8, 45000], [8, 50000]
         
-        # 1. PRIMARY POSITION CONSTRAINTS (At least 1 of each)
+        # Positional Constraints
         for pos in ['PG', 'SG', 'SF', 'PF', 'C']:
             A_rows.append(self.df['Pos'].str.contains(pos).astype(int).values)
             bl.append(1); bu.append(8)
-
-        # --- THE FIX: GUARD & FORWARD FLEX CONSTRAINTS ---
-        # We need at least 3 players eligible for Guard slots (PG + SG + G)
-        # We need at least 3 players eligible for Forward slots (SF + PF + F)
-        
-        # Guard Eligibility (PG or SG)
+            
+        # Flex Constraints (Must have 3 guards and 3 forwards total)
         is_guard = self.df['Pos'].apply(lambda x: 'PG' in x or 'SG' in x).astype(int)
         A_rows.append(is_guard.values)
-        bl.append(3); bu.append(8) # Must have at least 3 guards
+        bl.append(3); bu.append(8)
 
-        # Forward Eligibility (SF or PF)
         is_forward = self.df['Pos'].apply(lambda x: 'SF' in x or 'PF' in x).astype(int)
         A_rows.append(is_forward.values)
-        bl.append(3); bu.append(8) # Must have at least 3 forwards
+        bl.append(3); bu.append(8)
 
         A = np.vstack(A_rows)
         constraints = LinearConstraint(A, bl, bu)
@@ -169,7 +145,8 @@ class VantageOptimizer:
             if res.success:
                 idx = tuple(sorted(np.where(res.x > 0.5)[0]))
                 lineup_counts[idx] = lineup_counts.get(idx, 0) + 1
-            if i % 1000 == 0:
+            
+            if i % 500 == 0:
                 progress_bar.progress((i + 1) / n_sims)
         
         sorted_lineups = sorted(lineup_counts.items(), key=lambda x: x[1], reverse=True)[:20]
@@ -179,8 +156,7 @@ class VantageOptimizer:
             'df': self.get_dk_slots(self.df.iloc[list(idx)]), 
             'win_pct': (count/n_sims)*100, 
             'rel_score': (count/max_freq)*100, 
-            'proj': self.df.iloc[list(idx)]['Proj'].sum(),
-            'salary': self.df.iloc[list(idx)]['Sal'].sum()
+            'proj': self.df.iloc[list(idx)]['Proj'].sum()
         } for idx, count in sorted_lineups]
 
 # --- APP FLOW ---
@@ -190,7 +166,7 @@ scratches_input = st.sidebar.text_area("🚑 ADD SCRATCHES", height=100)
 
 if f:
     data = process_data(f.getvalue(), scratches_input)
-    if st.button("🚀 GENERATE 10,000 SIMS"):
+    if st.button("🚀 GENERATE SIMS"):
         optimizer = VantageOptimizer(data)
         st.session_state.results = optimizer.run_sims()
 
@@ -200,33 +176,31 @@ if 'results' in st.session_state:
         score = res['rel_score']
         card_class = "card-elite" if score > 85 else "card-strong" if score > 50 else "card-standard"
         
-        # HTML TABLE GENERATION
-        table_html = """<table class="styled-table">
-            <thead><tr><th>POS</th><th>PLAYER</th><th>TEAM</th><th>SAL</th><th>PROJ</th></tr></thead>
-            <tbody>"""
-        
+        # Pure HTML Table Construction
+        rows_html = ""
         for _, row in res['df'].iterrows():
-            table_html += f"""
-                <tr>
-                    <td class="pos-cell">{row['Slot']}</td>
-                    <td class="name-cell">{row['Name']}</td>
-                    <td>{row['Team']}</td>
-                    <td class="sal-cell">${int(row['Sal'])}</td>
-                    <td>{round(row['Proj'], 1)}</td>
-                </tr>
-            """
-        table_html += "</tbody></table>"
-
+            rows_html += f"""
+            <tr>
+                <td class="pos">{row['Slot']}</td>
+                <td><span class="name">{row['Name']}</span> <span class="meta">({row['Team']})</span></td>
+                <td class="sal">${int(row['Sal'])}</td>
+                <td class="proj">{round(row['Proj'], 1)}</td>
+            </tr>"""
+        
         with cols[i % 2]:
             st.markdown(f"""
-            <div class="lineup-card {card_class}">
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <div style="font-size:1.2em; font-weight:bold;">LINEUP #{i+1}</div>
-                    <div>
-                        <span class="badge-label bg-win">WIN: {round(res['win_pct'], 1)}%</span>
-                        <span class="badge-label bg-proj">{round(res['proj'], 1)} PTS</span>
-                    </div>
+            <div class="{card_class}">
+                <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
+                    <span style="font-weight:bold; font-size:1.1em; color: white;">LINEUP #{i+1}</span>
+                    <span class="badge">WIN: {round(res['win_pct'], 1)}%</span>
                 </div>
-                <hr style="border-color: #30363d; margin: 10px 0;">
-                {table_html}
-            </div>""", unsafe_allow_html=True)
+                <table>
+                    <thead>
+                        <tr><th>POS</th><th>PLAYER</th><th>SAL</th><th>PROJ</th></tr>
+                    </thead>
+                    <tbody>
+                        {rows_html}
+                    </tbody>
+                </table>
+            </div>
+            """, unsafe_allow_html=True)
