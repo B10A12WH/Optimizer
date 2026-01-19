@@ -5,26 +5,23 @@ from scipy.optimize import milp, LinearConstraint, Bounds
 import re
 import io
 
-# --- ELITE GLASS-MORPHIC UI CONFIG ---
-st.set_page_config(page_title="VANTAGE 99 | 10K COMMAND", layout="wide", page_icon="⚡")
+# --- ELITE DYNAMIC UI CONFIG ---
+st.set_page_config(page_title="VANTAGE 99 | DYNAMIC ALPHA", layout="wide", page_icon="⚡")
 
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap');
-    
     .main { background: radial-gradient(circle at top right, #1a1f2e, #0d1117); color: #c9d1d9; font-family: 'Inter', sans-serif; }
     
-    /* Dynamic Confidence Borders */
-    .card-high { border: 2px solid #238636 !important; background: rgba(35, 134, 54, 0.15); box-shadow: 0 0 15px rgba(35, 134, 54, 0.3); }
-    .card-med { border: 2px solid #d29922 !important; background: rgba(210, 153, 34, 0.1); }
-    .card-low { border: 2px solid #30363d !important; background: rgba(22, 27, 34, 0.5); }
+    /* DYNAMIC COLOR CLASSES */
+    .card-elite { border: 2px solid #238636 !important; background: rgba(35, 134, 54, 0.15); box-shadow: 0 0 20px rgba(35, 134, 54, 0.4); }
+    .card-strong { border: 2px solid #d29922 !important; background: rgba(210, 153, 34, 0.1); }
+    .card-standard { border: 1px solid #30363d !important; background: rgba(22, 27, 34, 0.5); }
 
     .lineup-card { border-radius: 12px; padding: 20px; margin-bottom: 20px; transition: 0.3s; }
     .badge-label { padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: bold; color: white; margin-left: 5px; }
     .bg-win { background: #238636; }
     .bg-proj { background: #1f6feb; }
-    
-    .stTable { background: transparent !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -100,60 +97,57 @@ class VantageUnifiedOptimizer:
             if res.success:
                 idx = tuple(sorted(np.where(res.x > 0.5)[0]))
                 lineup_counts[idx] = lineup_counts.get(idx, 0) + 1
-            if i % 250 == 0:
+            if i % 500 == 0:
                 progress_bar.progress((i + 1) / n_sims)
                 status_text.text(f"Processed {i}/{n_sims} simulations...")
 
         status_text.empty()
         sorted_lineups = sorted(lineup_counts.items(), key=lambda x: x[1], reverse=True)[:n_lineups]
+        
+        # DYNAMIC SCORING: Calculate confidence based on the top lineup's frequency
+        max_freq = sorted_lineups[0][1] if sorted_lineups else 1
+        
         final_pool = []
         for idx, count in sorted_lineups:
             ldf = self.get_dk_slots(self.df.iloc[list(idx)])
-            final_pool.append({'df': ldf, 'win_pct': (count/n_sims)*100, 'proj': ldf['Proj'].sum()})
+            # Relative confidence score (0 to 100)
+            rel_confidence = (count / max_freq) * 100
+            final_pool.append({
+                'df': ldf, 
+                'win_pct': (count/n_sims)*100, 
+                'rel_score': rel_confidence,
+                'proj': ldf['Proj'].sum()
+            })
         return final_pool
 
 # --- UI INTERFACE ---
 st.sidebar.title("🕹️ COMMAND")
 sport_mode = st.sidebar.radio("MODE", ["NBA", "NFL"])
 sim_count = st.sidebar.select_slider("SIMULATIONS", options=[1000, 3000, 5000, 10000], value=5000)
-corr_val = st.sidebar.slider("CORRELATION", 0.0, 1.0, 0.6)
-lev_val = st.sidebar.slider("LEVERAGE", 0.0, 1.0, 0.4)
 uploaded_file = st.sidebar.file_uploader("SALARY CSV", type="csv")
 
 if uploaded_file:
     engine = VantageUnifiedOptimizer(pd.read_csv(uploaded_file), sport=sport_mode)
     if st.button(f"⚡ RUN {sim_count} ALPHA SCRIPTS"):
-        st.session_state.results = engine.run_alpha_sims(n_sims=sim_count, correlation=corr_val, leverage=lev_val)
+        st.session_state.results = engine.run_alpha_sims(n_sims=sim_count)
         
 if 'results' in st.session_state:
-    tab1, tab2 = st.tabs(["🏆 LINEUPS", "📊 EXPOSURE"])
-    
-    with tab1:
-        cols = st.columns(2)
-        for i, res in enumerate(st.session_state.results):
-            win_pct = res['win_pct']
-            # DYNAMIC THRESHOLDS FOR 10K SIMS
-            card_class = "card-high" if win_pct > 0.8 else "card-med" if win_pct > 0.2 else "card-low"
-            
-            with cols[i % 2]:
-                st.markdown(f"""
-                <div class="lineup-card {card_class}">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                        <span style="font-weight: bold; font-size: 16px;">LINEUP #{i+1}</span>
-                        <div>
-                            <span class="badge-label bg-win">WIN: {round(win_pct, 2)}%</span>
-                            <span class="badge-label bg-proj">PROJ: {round(res['proj'], 1)}</span>
-                        </div>
+    cols = st.columns(2)
+    for i, res in enumerate(st.session_state.results):
+        # DYNAMIC GRADING: Based on relative performance to the #1 lineup
+        score = res['rel_score']
+        card_class = "card-elite" if score > 85 else "card-strong" if score > 50 else "card-standard"
+        
+        with cols[i % 2]:
+            st.markdown(f"""
+            <div class="lineup-card {card_class}">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <span style="font-weight: bold; font-size: 16px;">LINEUP #{i+1}</span>
+                    <div>
+                        <span class="badge-label bg-win">WIN: {round(res['win_pct'], 2)}%</span>
+                        <span class="badge-label bg-proj">PROJ: {round(res['proj'], 1)}</span>
                     </div>
                 </div>
-                """, unsafe_allow_html=True)
-                st.table(res['df'][['Slot', 'Name', 'Team', 'Sal', 'Proj']])
-                
-    with tab2:
-        st.subheader("Global Player Exposure")
-        # Flatten all players in the generated pool to see who you are heavy on
-        all_players = pd.concat([res['df'] for res in st.session_state.results])
-        exp_df = all_players['Name'].value_counts().reset_index()
-        exp_df.columns = ['Player', 'Lineups']
-        exp_df['Exposure %'] = (exp_df['Lineups'] / len(st.session_state.results)) * 100
-        st.dataframe(exp_df, use_container_width=True)
+            </div>
+            """, unsafe_allow_html=True)
+            st.table(res['df'][['Slot', 'Name', 'Team', 'Sal', 'Proj']])
