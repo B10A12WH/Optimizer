@@ -55,9 +55,12 @@ class VantageOptimizer:
         self.n_p = len(df)
 
     def get_dk_slots(self, lineup_df):
+        # Time-sorting players to reserve UTIL for latest starters
         players = lineup_df.sort_values('time_obj', ascending=False).to_dict('records')
-        flex_slots = ['UTIL', 'F', 'G']
-        specific_slots = ['C', 'PF', 'SF', 'SG', 'PG']
+        
+        # Solving order: We MUST fill C and Primary spots first to avoid "All UTIL" error
+        specific_slots = ['C', 'PG', 'SG', 'SF', 'PF']
+        flex_slots = ['G', 'F', 'UTIL']
         
         def fits(p, s):
             pos = p['Pos']
@@ -69,28 +72,21 @@ class VantageOptimizer:
         final_assignment = {}
         used_mask = 0
 
-        for s_name in flex_slots:
+        # Backtrack solver to find valid seating
+        def solve_seating(slot_list, current_idx, current_mask):
+            if current_idx == len(slot_list): return True
+            slot_name = slot_list[current_idx]
             for i, p in enumerate(players):
-                if not (used_mask & (1 << i)) and fits(p, s_name):
-                    final_assignment[s_name] = p.copy()
-                    final_assignment[s_name]['Slot'] = s_name
-                    used_mask |= (1 << i)
-                    break
-
-        remaining_slots = [s for s in specific_slots if s not in final_assignment]
-        
-        def backtrack_specific(slot_idx, current_mask):
-            if slot_idx == len(remaining_slots): return True
-            target_slot = remaining_slots[slot_idx]
-            for i, p in enumerate(players):
-                if not (current_mask & (1 << i)) and fits(p, target_slot):
-                    final_assignment[target_slot] = p.copy()
-                    final_assignment[target_slot]['Slot'] = target_slot
-                    if backtrack_specific(slot_idx + 1, current_mask | (1 << i)):
+                if not (current_mask & (1 << i)) and fits(p, slot_name):
+                    final_assignment[slot_name] = p.copy()
+                    final_assignment[slot_name]['Slot'] = slot_name
+                    if solve_seating(slot_list, current_idx + 1, current_mask | (1 << i)):
                         return True
             return False
 
-        if backtrack_specific(0, used_mask):
+        # Attempt to solve all 8 positions
+        all_target_slots = specific_slots + flex_slots
+        if solve_seating(all_target_slots, 0, 0):
             display_order = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
             return pd.DataFrame([final_assignment[s] for s in display_order])
         return None
@@ -110,20 +106,21 @@ class VantageOptimizer:
         vols = np.where(self.df['Sal'] < 4000, 0.25, np.where(self.df['Sal'] < 8000, 0.20, 0.15))
         self.df['Ceil'] = self.df['Proj'] + (self.df['Proj'] * vols * 2.33)
 
-        # Base Constraints
+        # Base Constraints - Fixed the 'bu' typo here
         A_base = [np.ones(self.n_p), self.df['Sal'].values]
         bl_base, bu_base = [8, 45000], [8, 50000]
         
         for p in ['PG', 'SG', 'SF', 'PF', 'C']:
             A_base.append(self.df['Pos'].str.contains(p).astype(int).values); bl_base.append(1); bu_base.append(8)
+        
         A_base.append(self.df['Pos'].apply(lambda x: 'PG' in x or 'SG' in x).astype(int).values); bl_base.append(3); bu_base.append(8)
-        A_base.append(self.df['Pos'].apply(lambda x: 'SF' in x or 'PF' in x).astype(int).values); bl_base.append(3); bu.append(8)
+        A_base.append(self.df['Pos'].apply(lambda x: 'SF' in x or 'PF' in x).astype(int).values); bl_base.append(3); bu_base.append(8)
         A_base.append(self.df['Pos'].apply(lambda x: 'C' in x and not ('SF' in x or 'PF' in x)).astype(int).values); bl_base.append(0); bu_base.append(2)
+        
         if is_hammer.sum() > 0: A_base.append(is_hammer.values); bl_base.append(1); bu_base.append(8)
 
         existing_lineups = []
         final_results = []
-        
         progress = st.progress(0)
         
         for n in range(n_lineups):
@@ -131,7 +128,6 @@ class VantageOptimizer:
             bl_run = list(bl_base)
             bu_run = list(bu_base)
             
-            # UNIQUE CONSTRAINT: Force new lineup to differ from all previous ones
             for old_idx in existing_lineups:
                 row = np.zeros(self.n_p)
                 row[list(old_idx)] = 1
@@ -139,9 +135,7 @@ class VantageOptimizer:
                 bl_run.append(0)
                 bu_run.append(8 - min_uniques)
             
-            # Generate GPP Noise for this specific run
             sim_p = self.df['Proj'].values * (1.0 + (np.random.normal(0, 1, self.n_p) * vols))
-            
             res = milp(c=-sim_p, constraints=LinearConstraint(np.vstack(A_run), bl_run, bu_run), 
                        integrality=np.ones(self.n_p), bounds=Bounds(0, 1))
             
