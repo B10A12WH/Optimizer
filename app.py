@@ -18,11 +18,11 @@ st.markdown("""
     .card-strong { border: 1px solid #d29922; background: rgba(210, 153, 34, 0.1); padding: 15px; border-radius: 10px; margin-bottom: 20px; }
     .card-standard { border: 1px solid #30363d; background: rgba(48, 54, 61, 0.2); padding: 15px; border-radius: 10px; margin-bottom: 20px; }
     table { width: 100%; border-collapse: collapse; }
-    th { text-align: left; color: #8b949e; font-size: 12px; border-bottom: 1px solid #30363d; padding-bottom: 5px; text-transform: uppercase; }
-    td { padding: 8px 0; border-bottom: 1px solid #21262d; font-size: 14px; }
-    .pos { color: #58a6ff; font-weight: bold; width: 50px; }
+    th { text-align: left; color: #8b949e; font-size: 11px; border-bottom: 1px solid #30363d; padding-bottom: 5px; text-transform: uppercase; }
+    td { padding: 6px 0; border-bottom: 1px solid #21262d; font-size: 13px; }
+    .pos { color: #58a6ff; font-weight: bold; width: 45px; }
     .name { color: #e6edf3; font-weight: 600; }
-    .meta { color: #8b949e; font-size: 12px; }
+    .meta { color: #8b949e; font-size: 11px; }
     .sal { color: #7ee787; font-family: monospace; text-align: right; }
     .proj { color: #c9d1d9; font-weight: bold; text-align: right; }
     .ceil { color: #d29922; font-weight: bold; text-align: right; font-family: monospace; }
@@ -43,6 +43,7 @@ def process_data(file_bytes, manual_scratches_str):
     df['Pos'] = df[cols.get('position', df.columns[0])].astype(str).str.strip()
     df['Team'] = df[cols.get('teamabbrev', df.columns[7])].astype(str)
     df['GameInfo'] = df[cols.get('gameinfo', df.columns[6])].astype(str)
+    
     manual_list = [s.strip().lower() for s in manual_scratches_str.split('\n') if s.strip()]
     full_scratch_list = [s.lower() for s in FORCED_OUT] + manual_list
     mask = df['Name'].str.lower().apply(lambda x: any(scratch in x for scratch in full_scratch_list))
@@ -50,16 +51,17 @@ def process_data(file_bytes, manual_scratches_str):
     df = df[~df['Name'].str.contains("Toppin|Kuminga", case=False)]
     return df[df['Proj'] > 0.1].reset_index(drop=True)
 
+# --- WORKER TASK ---
 def solve_batch_task(args):
     (indices, proj_matrix, A_matrix, bl, bu, n_p) = args
     constraints = LinearConstraint(A_matrix, bl, bu)
-    batch_counts = {}
-    for i, _ in enumerate(indices):
+    counts = {}
+    for i in range(len(proj_matrix)):
         res = milp(c=-proj_matrix[i], constraints=constraints, integrality=np.ones(n_p), bounds=Bounds(0, 1))
         if res.success:
-            lineup_idx = tuple(sorted(np.where(res.x > 0.5)[0]))
-            batch_counts[lineup_idx] = batch_counts.get(lineup_idx, 0) + 1
-    return batch_counts
+            idx = tuple(sorted(np.where(res.x > 0.5)[0]))
+            counts[idx] = counts.get(idx, 0) + 1
+    return counts
 
 class VantageOptimizer:
     def __init__(self, df):
@@ -67,12 +69,13 @@ class VantageOptimizer:
         self.n_p = len(df)
 
     def get_dk_slots(self, lineup_df):
-        """
-        ADVANCED DEPTH-FIRST SEARCH SLOTTING:
-        Ensures players are assigned to valid DK positions (PG, SG, SF, PF, C, G, F, UTIL).
-        """
-        players = lineup_df.to_dict('records')
-        slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
+        # Time-Priority Logic: Fill flex with LATEST starters first
+        players = lineup_df.sort_values('time_obj', ascending=False).to_dict('records')
+        
+        # 1. Flexible Slots (Prioritize late players)
+        # 2. Strict Slots (Fill with early/remaining players)
+        flex_slots = ['UTIL', 'F', 'G']
+        specific_slots = ['C', 'PF', 'SF', 'SG', 'PG']
         
         def fits(p, s):
             pos = p['Pos']
@@ -81,29 +84,36 @@ class VantageOptimizer:
             if s == 'F': return 'SF' in pos or 'PF' in pos
             return s in pos
 
-        # We will try to fill the slots one by one using recursion
-        solution = [None] * 8
+        final_assignment = {}
+        used_mask = 0
 
-        def dfs(slot_idx, available_mask):
-            if slot_idx == 8:
-                return True
-            
-            for p_idx in range(8):
-                if not (available_mask & (1 << p_idx)):
-                    if fits(players[p_idx], slots[slot_idx]):
-                        solution[slot_idx] = players[p_idx].copy()
-                        solution[slot_idx]['Slot'] = slots[slot_idx]
-                        if dfs(slot_idx + 1, available_mask | (1 << p_idx)):
-                            return True
+        # Step A: Greedily place late players into Flex to preserve Late Swap
+        for s_name in flex_slots:
+            for i, p in enumerate(players):
+                if not (used_mask & (1 << i)) and fits(p, s_name):
+                    final_assignment[s_name] = p.copy()
+                    final_assignment[s_name]['Slot'] = s_name
+                    used_mask |= (1 << i)
+                    break
+
+        # Step B: Backtrack remaining players into Specific Slots
+        remaining_slots = [s for s in specific_slots if s not in final_assignment]
+        
+        def backtrack_specific(slot_idx, current_mask):
+            if slot_idx == len(remaining_slots): return True
+            target_slot = remaining_slots[slot_idx]
+            for i, p in enumerate(players):
+                if not (current_mask & (1 << i)) and fits(p, target_slot):
+                    final_assignment[target_slot] = p.copy()
+                    final_assignment[target_slot]['Slot'] = target_slot
+                    if backtrack_specific(slot_idx + 1, current_mask | (1 << i)):
+                        return True
             return False
 
-        if dfs(0, 0):
-            return pd.DataFrame(solution)
-        
-        # Absolute Emergency Fallback
-        lineup_df = lineup_df.copy()
-        lineup_df['Slot'] = 'UTIL'
-        return lineup_df
+        if backtrack_specific(0, used_mask):
+            display_order = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
+            return pd.DataFrame([final_assignment[s] for s in display_order])
+        return None
 
     def run_sims(self, n_sims=8000):
         np.random.seed(42)
@@ -116,11 +126,6 @@ class VantageOptimizer:
         self.df['time_obj'] = self.df['GameInfo'].apply(parse_time)
         latest_time = self.df['time_obj'].max()
         is_hammer = (self.df['time_obj'] == latest_time).astype(int)
-        
-        unique_teams = self.df['Team'].unique()
-        team_map = {t: i for i, t in enumerate(unique_teams)}
-        player_team_indices = self.df['Team'].map(team_map).values
-        
         vols = np.where(self.df['Sal'] < 4000, 0.25, np.where(self.df['Sal'] < 8000, 0.20, 0.15))
         self.df['Ceil'] = self.df['Proj'] + (self.df['Proj'] * vols * 2.33)
 
@@ -128,35 +133,40 @@ class VantageOptimizer:
         bl, bu = [8, 45000], [8, 50000]
         for p in ['PG', 'SG', 'SF', 'PF', 'C']:
             A_rows.append(self.df['Pos'].str.contains(p).astype(int).values); bl.append(1); bu.append(8)
-        
         A_rows.append(self.df['Pos'].apply(lambda x: 'PG' in x or 'SG' in x).astype(int).values); bl.append(3); bu.append(8)
         A_rows.append(self.df['Pos'].apply(lambda x: 'SF' in x or 'PF' in x).astype(int).values); bl.append(3); bu.append(8)
         A_rows.append(self.df['Pos'].apply(lambda x: 'C' in x and not ('SF' in x or 'PF' in x)).astype(int).values); bl.append(0); bu.append(2)
-        if is_hammer.sum() > 0:
-            A_rows.append(is_hammer.values); bl.append(1); bu.append(8)
+        if is_hammer.sum() > 0: A_rows.append(is_hammer.values); bl.append(1); bu.append(8)
 
         A_matrix = np.vstack(A_rows)
-        team_noise = np.random.normal(1.0, 0.15, (n_sims, len(unique_teams)))
+        team_noise = np.random.normal(1.0, 0.15, (n_sims, len(self.df['Team'].unique())))
+        team_idx = self.df['Team'].map({t: i for i, t in enumerate(self.df['Team'].unique())}).values
         player_noise = 1.0 + (np.random.normal(0, 1, (n_sims, self.n_p)) * vols)
         
         all_projs = np.zeros((n_sims, self.n_p))
         for i in range(n_sims):
-            all_projs[i] = self.df['Proj'].values * ((player_noise[i] * 0.6) + (team_noise[i][player_team_indices] * 0.4))
+            all_projs[i] = self.df['Proj'].values * ((player_noise[i] * 0.6) + (team_noise[i][team_idx] * 0.4))
 
         n_workers = os.cpu_count() or 4
         chunk = n_sims // n_workers
         tasks = [(range(i*chunk, (i+1)*chunk if i<n_workers-1 else n_sims), all_projs[i*chunk:(i+1)*chunk if i<n_workers-1 else n_sims], A_matrix, bl, bu, self.n_p) for i in range(n_workers)]
         
-        lineup_counts = {}
+        counts = {}
         progress = st.progress(0)
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as exec:
             for i, res in enumerate(exec.map(solve_batch_task, tasks)):
-                for idx, c in res.items(): lineup_counts[idx] = lineup_counts.get(idx, 0) + c
+                for idx, c in res.items(): counts[idx] = counts.get(idx, 0) + c
                 progress.progress((i + 1) / n_workers)
 
-        sorted_lineups = sorted(lineup_counts.items(), key=lambda x: x[1], reverse=True)[:20]
+        sorted_lineups = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:30]
         max_f = sorted_lineups[0][1] if sorted_lineups else 1
-        return [{'df': self.get_dk_slots(self.df.iloc[list(idx)]), 'rel_score': int((c/max_f)*100), 'proj': self.df.iloc[list(idx)]['Proj'].sum(), 'ceil': self.df.iloc[list(idx)]['Ceil'].sum(), 'hammer_count': self.df.iloc[list(idx)]['time_obj'].apply(lambda t: t == latest_time).sum()} for idx, c in sorted_lineups]
+        
+        final_results = []
+        for idx, c in sorted_lineups:
+            ldf = self.get_dk_slots(self.df.iloc[list(idx)])
+            if ldf is not None:
+                final_results.append({'df': ldf, 'rel_score': int((c/max_f)*100), 'proj': self.df.iloc[list(idx)]['Proj'].sum(), 'ceil': self.df.iloc[list(idx)]['Ceil'].sum(), 'hammer_count': self.df.iloc[list(idx)]['time_obj'].apply(lambda t: t == latest_time).sum()})
+        return final_results[:20]
 
 # --- UI FLOW ---
 st.sidebar.title("🕹️ COMMAND")
@@ -174,4 +184,4 @@ if 'results' in st.session_state:
         card = "card-elite" if res['rel_score'] >= 90 else "card-strong" if res['rel_score'] >= 75 else "card-standard"
         rows = "".join([f"<tr><td class='pos'>{r['Slot']}</td><td><span class='name'>{r['Name']}</span> <span class='meta'>({r['Team']})</span></td><td class='sal'>${int(r['Sal'])}</td><td class='proj'>{round(r['Proj'],1)}</td><td class='ceil'>{round(r['Ceil'],1)}</td></tr>" for _, r in res['df'].iterrows()])
         with cols[i % 2]:
-            st.markdown(f"<div class='{card}'><div style='display:flex; justify-content:space-between; margin-bottom:10px;'><div><b>LINEUP #{i+1}</b>{'<span class="hammer-badge">🔨 HAMMER</span>' if res['hammer_count']>0 else ''}</div><div><span class='badge'>SCORE: {res['rel_score']}</span> <span class='badge' style='background:#d29922;'>CEIL: {round(res['ceil'],1)}</span></div></div><table><thead><tr><th>POS</th><th>PLAYER</th><th>SAL</th><th>PROJ</th><th>99%</th></tr></thead><tbody>{rows}</tbody></table></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='{card}'><div style='display:flex; justify-content:space-between; margin-bottom:10px;'><div><b>LINEUP #{i+1}</b>{' <span class=\"hammer-badge\">🔨 HAMMER</span>' if res['hammer_count']>0 else ''}</div><div><span class='badge'>SCORE: {res['rel_score']}</span> <span class='badge' style='background:#d29922;'>CEIL: {round(res['ceil'],1)}</span></div></div><table><thead><tr><th>POS</th><th>PLAYER</th><th>SAL</th><th>PROJ</th><th>99%</th></tr></thead><tbody>{rows}</tbody></table></div>", unsafe_allow_html=True)
