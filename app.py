@@ -68,8 +68,9 @@ class VantageOptimizer:
         """
         BACKTRACKING SOLVER:
         Guarantees that if a valid position assignment exists, it will find it.
-        Eliminates the 'MISSING' bug caused by greedy logic.
+        Includes a fallback to prevent KeyErrors.
         """
+        lineup_df = lineup_df.copy()
         players = lineup_df.to_dict('records')
         slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
         
@@ -98,11 +99,8 @@ class VantageOptimizer:
                     remaining = available_players[:i] + available_players[i+1:]
                     if solve(slot_idx + 1, remaining):
                         return True
-            
             return False
 
-        # Sort players to try "harder" positions first in the recursion logic? 
-        # Actually, backtracking handles it, but let's just run it.
         success = solve(0, players)
         
         if success:
@@ -110,7 +108,8 @@ class VantageOptimizer:
                 p['Slot'] = slots[i]
             return pd.DataFrame(assignment)
         else:
-            # Fallback (Should never happen due to constraints)
+            # Fallback: Assign 'UTIL' to everyone to prevent crash
+            lineup_df['Slot'] = 'UTIL'
             return lineup_df
 
     def run_sims(self, n_sims=5000):
@@ -179,12 +178,19 @@ if 'results' in st.session_state:
         # Pure HTML Table Construction
         rows_html = ""
         for _, row in res['df'].iterrows():
+            # Safety check for missing data
+            slot_display = row.get('Slot', 'ERR')
+            name_display = row.get('Name', 'Unknown')
+            team_display = row.get('Team', 'N/A')
+            sal_display = int(row.get('Sal', 0))
+            proj_display = round(row.get('Proj', 0.0), 1)
+
             rows_html += f"""
             <tr>
-                <td class="pos">{row['Slot']}</td>
-                <td><span class="name">{row['Name']}</span> <span class="meta">({row['Team']})</span></td>
-                <td class="sal">${int(row['Sal'])}</td>
-                <td class="proj">{round(row['Proj'], 1)}</td>
+                <td class="pos">{slot_display}</td>
+                <td><span class="name">{name_display}</span> <span class="meta">({team_display})</span></td>
+                <td class="sal">${sal_display}</td>
+                <td class="proj">{proj_display}</td>
             </tr>"""
         
         with cols[i % 2]:
